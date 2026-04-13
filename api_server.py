@@ -32,6 +32,7 @@ from typing import AsyncGenerator
 
 import pytz
 import yfinance as yf
+import httpx
 import pandas as pd
 import numpy as np
 
@@ -54,6 +55,47 @@ try:
     FEEDPARSER = True
 except ImportError:
     FEEDPARSER = False
+
+
+# ── Telegram Notification Config ──────────────────────────────────────────
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+
+
+def send_telegram(signal: dict):
+    """Send a signal notification to Telegram. Runs in a background thread."""
+    try:
+        icon    = '🟢' if signal['signal'] == 'BUY' else '🔴'
+        entry   = signal['entry']
+        target  = signal['target']
+        sl      = signal['stop_loss']
+        pct_tgt = round((target - entry) / entry * 100, 2)
+        pct_sl  = round((sl - entry) / entry * 100, 2)
+
+        lines = [
+            f"{icon} *{signal['signal']} SIGNAL — {signal['symbol']}*",
+            "",
+            f"Entry  : Rs {entry:,.2f}",
+            f"Target : Rs {target:,.2f}  ({pct_tgt:+.2f}%)",
+            f"SL     : Rs {sl:,.2f}  ({pct_sl:+.2f}%)",
+            f"Score  : {signal['score']}/13",
+            f"RSI    : {signal['rsi']}",
+            f"ADX    : {signal['adx']}",
+            f"Candle : {signal.get('candle', '-')}",
+            f"News   : {signal.get('sentiment', '-')}",
+            "",
+            signal.get('reasons', ''),
+        ]
+        msg = "\n".join(lines)
+
+        httpx.post(
+            TELEGRAM_API_URL,
+            json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f'Telegram error: {e}')
 
 # ── Try importing Symbols list ────────────────────────────────────────────
 try:
@@ -562,6 +604,8 @@ async def scan_stream(symbols: str = ""):
                     payload = dict(result)
                     payload["type"] = "signal"
                     yield f"data: {json.dumps(payload)}\n\n"
+                    # Fire Telegram notification in background thread
+                    threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
 
             scan_state["last_scan"] = datetime.now(IST).isoformat()
             yield f"data: {json.dumps({'type':'done','total_signals':signal_count,'scanned':len(symbol_list)})}\n\n"
