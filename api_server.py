@@ -140,12 +140,14 @@ app.add_middleware(
 
 # ── Shared scan state ──────────────────────────────────────────────────────
 scan_state = {
-    "running":   False,
-    "stop_flag": False,
-    "results":   [],
-    "scanned":   0,
-    "total":     0,
-    "last_scan": None,
+    "running":      False,
+    "stop_flag":    False,
+    "results":      [],
+    "scanned":      0,
+    "total":        0,
+    "last_scan":    None,
+    "notified_today": {},   # key -> date, tracks sent notifications
+    "notified_date":  None, # date when tracker was last reset
 }
 
 
@@ -604,8 +606,18 @@ async def scan_stream(symbols: str = ""):
                     payload = dict(result)
                     payload["type"] = "signal"
                     yield f"data: {json.dumps(payload)}\n\n"
-                    # Fire Telegram notification in background thread
-                    threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
+                    # Duplicate check — build a fingerprint from key fields
+                    today = datetime.now(IST).date().isoformat()
+                    if scan_state["notified_date"] != today:
+                        scan_state["notified_today"] = {}
+                        scan_state["notified_date"]  = today
+                    fingerprint = (
+                        f"{result['symbol']}|{result['signal']}|"
+                        f"{result['entry']}|{result['target']}|{result['stop_loss']}"
+                    )
+                    if fingerprint not in scan_state["notified_today"]:
+                        scan_state["notified_today"][fingerprint] = today
+                        threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
 
             scan_state["last_scan"] = datetime.now(IST).isoformat()
             yield f"data: {json.dumps({'type':'done','total_signals':signal_count,'scanned':len(symbol_list)})}\n\n"
