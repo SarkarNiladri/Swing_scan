@@ -658,7 +658,7 @@ async def scan_stop():
     return {"stopped": True, "msg": "Stop signal sent"}
 
 
-@app.get("/ping")
+@app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return {"ping": "pong", "time": datetime.now(IST).isoformat()}
 
