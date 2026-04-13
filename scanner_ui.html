@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwingScan — Nifty 100 Scanner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #0a0d12;
+      --surface:   #111620;
+      --surface2:  #171d2b;
+      --border:    #1e2a3d;
+      --border2:   #263347;
+      --green:     #00e5a0;
+      --green-dim: rgba(0,229,160,0.12);
+      --red:       #ff4757;
+      --red-dim:   rgba(255,71,87,0.12);
+      --amber:     #f4b942;
+      --amber-dim: rgba(244,185,66,0.12);
+      --blue:      #3d8ef8;
+      --blue-dim:  rgba(61,142,248,0.12);
+      --text:      #e2e8f0;
+      --text-dim:  #64748b;
+      --text-muted:#334155;
+      --mono: 'JetBrains Mono', monospace;
+      --display: 'Syne', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      min-height: 100vh;
+    }
+
+    #app { padding: 16px; max-width: 1600px; margin: 0 auto; }
+
+    /* ── HEADER ── */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+      flex-wrap: wrap; gap: 10px;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .logo { font-family: var(--display); font-size: 18px; font-weight: 700; color: var(--green); letter-spacing: -0.5px; }
+    .version-tag {
+      font-size: 10px; padding: 2px 8px;
+      background: var(--green-dim); border: 1px solid var(--green);
+      border-radius: 3px; color: var(--green);
+    }
+    .nifty-trend {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 3px;
+      font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;
+      border: 1px solid var(--border2); color: var(--text-dim);
+      transition: all 0.3s;
+    }
+    .nifty-trend.bullish { background: var(--green-dim); border-color: var(--green); color: var(--green); }
+    .nifty-trend.bearish { background: var(--red-dim);   border-color: var(--red);   color: var(--red); }
+    .nifty-trend.neutral { background: var(--amber-dim); border-color: var(--amber); color: var(--amber); }
+
+    .header-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .market-status { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .status-dot.closed { background: var(--red); }
+    .status-dot.open { animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0   rgba(0,229,160,0.5); }
+      70%  { box-shadow: 0 0 0 6px rgba(0,229,160,0); }
+      100% { box-shadow: 0 0 0 0   rgba(0,229,160,0); }
+    }
+    .clock { color: var(--text-dim); font-size: 11px; min-width: 120px; }
+
+    /* ── API URL BAR ── */
+    .api-bar {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 14px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 12px;
+    }
+    .api-bar label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; white-space: nowrap; }
+    .api-bar input {
+      flex: 1; background: var(--surface2); border: 1px solid var(--border2);
+      color: var(--text); padding: 5px 10px; border-radius: 4px;
+      font-family: var(--mono); font-size: 11px;
+    }
+    .api-bar input:focus { outline: none; border-color: var(--blue); }
+    .connect-btn {
+      background: var(--blue-dim); border: 1px solid var(--blue); color: var(--blue);
+      padding: 5px 14px; border-radius: 4px; cursor: pointer;
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      transition: all 0.15s; white-space: nowrap;
+    }
+    .connect-btn:hover { background: var(--blue); color: #000; }
+    .conn-indicator {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--text-muted); flex-shrink: 0; transition: background 0.3s;
+    }
+    .conn-indicator.ok  { background: var(--green); }
+    .conn-indicator.err { background: var(--red); }
+
+    /* ── METRICS ── */
+    .metrics-row { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; margin-bottom: 14px; }
+    .metric-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px 14px; position: relative; overflow: hidden;
+    }
+    .metric-card::before { content:''; position:absolute; top:0;left:0;right:0;height:2px; }
+    .metric-card.green::before { background:var(--green); }
+    .metric-card.red::before   { background:var(--red); }
+    .metric-card.amber::before { background:var(--amber); }
+    .metric-card.blue::before  { background:var(--blue); }
+    .metric-card.neutral::before { background:var(--border2); }
+    .metric-label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
+    .metric-value { font-size:22px; font-family:var(--display); font-weight:700; }
+    .metric-value.green { color:var(--green); }
+    .metric-value.red   { color:var(--red); }
+    .metric-value.amber { color:var(--amber); }
+    .metric-value.blue  { color:var(--blue); }
+    .metric-sub { font-size:10px; color:var(--text-dim); margin-top:4px; }
+
+    /* ── CONTROLS ── */
+    .controls-row {
+      display: flex; gap: 8px; align-items: center;
+      margin-bottom: 12px; flex-wrap: wrap;
+    }
+    .filter-btn {
+      background: var(--surface); border: 1px solid var(--border2);
+      color: var(--text-dim); padding: 5px 12px; border-radius: 4px;
+      cursor: pointer; font-family: var(--mono); font-size: 11px; transition: all 0.15s;
+    }
+    .filter-btn:hover { border-color: var(--blue); color: var(--blue); }
+    .filter-btn.active.all  { background:var(--blue-dim);  border-color:var(--blue);  color:var(--blue); }
+    .filter-btn.active.buy  { background:var(--green-dim); border-color:var(--green); color:var(--green); }
+    .filter-btn.active.sell { background:var(--red-dim);   border-color:var(--red);   color:var(--red); }
+
+    .sym-input {
+      background: var(--surface2); border: 1px solid var(--border2);
+      color: var(--text); padding: 5px 10px; border-radius: 4px;
+      font-family: var(--mono); font-size: 11px; width: 200px;
+    }
+    .sym-input:focus { outline: none; border-color: var(--blue); }
+    .sym-input::placeholder { color: var(--text-muted); }
+
+    .score-filter { display:flex; align-items:center; gap:6px; color:var(--text-dim); font-size:11px; }
+    .score-filter select {
+      background:var(--surface2); border:1px solid var(--border2); color:var(--text);
+      padding:4px 8px; border-radius:4px; font-family:var(--mono); font-size:11px; cursor:pointer;
+    }
+
+    .scan-btn {
+      background: var(--green-dim); border: 1px solid var(--green);
+      color: var(--green); padding: 5px 18px; border-radius: 4px;
+      cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600;
+      transition: all 0.15s; margin-left: auto;
+    }
+    .scan-btn:hover:not(:disabled) { background: var(--green); color: #000; }
+    .scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .stop-btn {
+      background: var(--red-dim); border: 1px solid var(--red);
+      color: var(--red); padding: 5px 14px; border-radius: 4px;
+      cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600;
+      transition: all 0.15s; display: none;
+    }
+    .stop-btn:hover { background: var(--red); color: #fff; }
+
+    /* ── AUTO-SCAN TOGGLE ── */
+    .auto-scan-wrap {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--surface); border: 1px solid var(--border2);
+      border-radius: 4px; padding: 4px 10px;
+      cursor: pointer; user-select: none; transition: border-color 0.2s;
+    }
+    .auto-scan-wrap:hover { border-color: var(--amber); }
+    .auto-scan-wrap.active {
+      background: var(--amber-dim); border-color: var(--amber);
+    }
+    .toggle-track {
+      width: 28px; height: 14px; border-radius: 7px;
+      background: var(--border2); position: relative; transition: background 0.2s; flex-shrink: 0;
+    }
+    .toggle-track.on { background: var(--amber); }
+    .toggle-knob {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #fff; position: absolute; top: 2px; left: 2px;
+      transition: left 0.2s;
+    }
+    .toggle-track.on .toggle-knob { left: 16px; }
+    .auto-label { font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+    .auto-scan-wrap.active .auto-label { color: var(--amber); }
+    .countdown-badge {
+      display: none; font-size: 10px; font-weight: 600;
+      color: var(--amber); min-width: 36px; text-align: right;
+    }
+    .countdown-badge.visible { display: block; }
+
+    /* ── TABLE ── */
+    .table-wrap {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; overflow: hidden; margin-bottom: 12px;
+    }
+    .table-header-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      font-size: 11px; color: var(--text-dim);
+    }
+    .scanning-bar {
+      display: none; align-items: center; gap: 8px; padding: 7px 14px;
+      background: var(--surface2); border-bottom: 1px solid var(--border);
+      font-size: 11px; color: var(--text-dim);
+    }
+    .scanning-bar.active { display: flex; }
+    .progress-track { flex:1; height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
+    .progress-fill  { height:100%; background:var(--green); border-radius:2px; width:0%; transition:width 0.4s; }
+
+    .tbl-scroll { overflow-x: auto; }
+    table { width:100%; border-collapse:collapse; table-layout:fixed; min-width:900px; }
+    thead tr { background: var(--surface2); }
+    th {
+      padding: 8px 10px; text-align: left; font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim);
+      border-bottom: 1px solid var(--border); cursor: pointer;
+      white-space: nowrap; user-select: none; transition: color 0.15s;
+    }
+    th:hover { color: var(--text); }
+    th.sorted { color: var(--blue); }
+    th .sort-arrow { margin-left: 3px; opacity: 0.5; font-size: 9px; }
+    td {
+      padding: 9px 10px; font-size: 11px; border-bottom: 1px solid var(--border);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .signal-pill {
+      display: inline-block; padding: 2px 8px; border-radius: 3px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+    }
+    .signal-pill.BUY  { background:var(--green-dim); border:1px solid var(--green); color:var(--green); }
+    .signal-pill.SELL { background:var(--red-dim);   border:1px solid var(--red);   color:var(--red); }
+
+    .score-bar { display:flex; align-items:center; gap:5px; }
+    .score-dots { display:flex; gap:2px; }
+    .dot { width:4px; height:10px; border-radius:1px; background:var(--border2); }
+    .dot.filled { background:var(--amber); }
+    .dot.high   { background:var(--green); }
+
+    .sentiment-badge { font-size:10px; padding:2px 6px; border-radius:3px; }
+    .sentiment-badge.Positive { background:var(--green-dim); color:var(--green); }
+    .sentiment-badge.Negative { background:var(--red-dim);   color:var(--red); }
+    .sentiment-badge.Neutral  { background:var(--amber-dim); color:var(--amber); }
+
+    .ticker { font-weight:600; color:var(--text); font-size:12px; }
+    .price  { font-weight:600; color:var(--text); }
+    .target-p { color:var(--green); }
+    .sl-p     { color:var(--red); }
+    .reasons-cell { color:var(--text-dim); font-size:10px; }
+    .time-cell    { color:var(--text-muted); font-size:10px; }
+
+    .empty-state { text-align:center; padding:48px 20px; color:var(--text-muted); }
+    .empty-state .icon { font-size:28px; margin-bottom:10px; color:var(--border2); }
+
+    /* ── LOG ── */
+    .log-panel { background:var(--surface); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+    .log-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:8px 14px; border-bottom:1px solid var(--border);
+      font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:1px;
+    }
+    .log-clear { cursor:pointer; color:var(--text-muted); font-size:10px; }
+    .log-clear:hover { color:var(--red); }
+    .log-body { padding:8px 14px; height:100px; overflow-y:auto; font-size:11px; line-height:2; }
+    .log-entry         { color:var(--text-dim); }
+    .log-entry.buy     { color:var(--green); }
+    .log-entry.sell    { color:var(--red); }
+    .log-entry.info    { color:var(--blue); }
+    .log-entry.warn    { color:var(--amber); }
+    .log-entry.err     { color:var(--red); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 900px) {
+      .metrics-row { grid-template-columns: repeat(3,1fr); }
+    }
+    @media (max-width: 600px) {
+      .metrics-row { grid-template-columns: repeat(2,1fr); }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">SwingScan</div>
+      <div class="version-tag">NIFTY 100</div>
+      <div class="nifty-trend" id="niftyBadge">NIFTY —</div>
+    </div>
+    <div class="header-right">
+      <div class="market-status">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText" style="color:var(--text-dim);">—</span>
+      </div>
+      <div class="clock" id="clock">--:--:-- IST</div>
+    </div>
+  </div>
+
+  <!-- API URL BAR -->
+  <div class="api-bar">
+    <label>API URL</label>
+    <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000" />
+    <button class="connect-btn" onclick="checkConnection()">Connect</button>
+    <div class="conn-indicator" id="connIndicator" title="Connection status"></div>
+    <span id="connLabel" style="font-size:10px;color:var(--text-dim);">not connected</span>
+  </div>
+
+  <!-- METRICS -->
+  <div class="metrics-row">
+    <div class="metric-card green">
+      <div class="metric-label">Total Signals</div>
+      <div class="metric-value green" id="mTotal">—</div>
+      <div class="metric-sub">this scan</div>
+    </div>
+    <div class="metric-card green">
+      <div class="metric-label">BUY</div>
+      <div class="metric-value green" id="mBuy">—</div>
+      <div class="metric-sub">long setups</div>
+    </div>
+    <div class="metric-card red">
+      <div class="metric-label">SELL</div>
+      <div class="metric-value red" id="mSell">—</div>
+      <div class="metric-sub">short setups</div>
+    </div>
+    <div class="metric-card amber">
+      <div class="metric-label">Avg Score</div>
+      <div class="metric-value amber" id="mAvg">—</div>
+      <div class="metric-sub">out of 13</div>
+    </div>
+    <div class="metric-card blue">
+      <div class="metric-label">High Confidence</div>
+      <div class="metric-value blue" id="mHigh">—</div>
+      <div class="metric-sub">score ≥ 10</div>
+    </div>
+  </div>
+
+  <!-- CONTROLS -->
+  <div class="controls-row">
+    <button class="filter-btn active all" id="btnAll"  onclick="setFilter('ALL')">ALL</button>
+    <button class="filter-btn buy"        id="btnBuy"  onclick="setFilter('BUY')">BUY</button>
+    <button class="filter-btn sell"       id="btnSell" onclick="setFilter('SELL')">SELL</button>
+    <input  class="sym-input" id="symInput" type="text"
+            placeholder="Override symbols: RELIANCE,TCS,INFY" title="Comma-separated symbols to scan (blank = full Nifty 100)" />
+    <div class="score-filter">
+      Min Score:
+      <select id="minScore" onchange="renderTable()">
+        <option value="0">All</option>
+        <option value="9" selected>9+</option>
+        <option value="10">10+</option>
+        <option value="11">11+</option>
+      </select>
+    </div>
+    <div class="auto-scan-wrap" id="autoWrap" onclick="toggleAutoScan()" title="Auto-scan every 15 minutes during market hours">
+      <div class="toggle-track" id="toggleTrack">
+        <div class="toggle-knob"></div>
+      </div>
+      <span class="auto-label" id="autoLabel">Auto 15 min</span>
+      <span class="countdown-badge" id="countdown"></span>
+    </div>
+    <button class="scan-btn" id="scanBtn" onclick="startScan()">&#9654; SCAN</button>
+    <button class="stop-btn" id="stopBtn" onclick="stopScan()">&#9632; STOP</button>
+  </div>
+
+  <!-- SIGNAL TABLE -->
+  <div class="table-wrap">
+    <div class="table-header-bar">
+      <span>Signal Feed</span>
+      <span id="tableCount" style="color:var(--blue);">0 signals</span>
+    </div>
+    <div class="scanning-bar" id="scanBar">
+      <span id="scanLabel">Connecting...</span>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <span id="scanPct">0%</span>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:80px"  onclick="sortBy('symbol')">Symbol <span class="sort-arrow">↕</span></th>
+            <th style="width:55px"  onclick="sortBy('signal')">Signal</th>
+            <th style="width:70px"  onclick="sortBy('entry')">Entry ₹</th>
+            <th style="width:70px"  onclick="sortBy('target')">Target ₹</th>
+            <th style="width:70px"  onclick="sortBy('stop_loss')">SL ₹</th>
+            <th style="width:42px"  onclick="sortBy('rsi')">RSI</th>
+            <th style="width:42px"  onclick="sortBy('adx')">ADX</th>
+            <th style="width:85px"  onclick="sortBy('score')">Score</th>
+            <th style="width:70px">News</th>
+            <th style="width:95px">Candle</th>
+            <th style="width:65px">Time</th>
+            <th>Reasons</th>
+          </tr>
+        </thead>
+        <tbody id="signalBody">
+          <tr><td colspan="12">
+            <div class="empty-state">
+              <div class="icon">&#9782;</div>
+              Connect to your API server, then click SCAN
+            </div>
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ACTIVITY LOG -->
+  <div class="log-panel">
+    <div class="log-header">
+      <span>Activity Log</span>
+      <span class="log-clear" onclick="clearLog()">clear</span>
+    </div>
+    <div class="log-body" id="logBody"></div>
+  </div>
+
+</div>
+
+<script>
+// ── STATE ─────────────────────────────────────────────────────────────────
+let allSignals   = [];
+let displayFilter = 'ALL';
+let sortKey      = 'score';
+let sortDir      = -1;
+let logEvents    = [];
+let evtSource    = null;
+let connected    = false;
+
+// ── CLOCK ─────────────────────────────────────────────────────────────────
+function updateClock() {
+  const ist = new Date().toLocaleString('en-US', {timeZone:'Asia/Kolkata',
+    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+  document.getElementById('clock').textContent = ist + ' IST';
+
+  const d = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Kolkata'}));
+  const h = d.getHours(), m = d.getMinutes(), wd = d.getDay();
+  const isOpen = wd>=1 && wd<=5 && (h>9||(h===9&&m>=15)) && (h<15||(h===15&&m<=30));
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  dot.className = 'status-dot ' + (isOpen ? 'open' : 'closed');
+  if (isOpen) { txt.textContent='MARKET OPEN';   txt.style.color='var(--green)'; }
+  else        { txt.textContent='MARKET CLOSED'; txt.style.color='var(--red)'; }
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+function apiBase() {
+  return document.getElementById('apiUrl').value.replace(/\/+$/, '');
+}
+
+function logAdd(msg, type='info') {
+  const now = new Date().toLocaleTimeString('en-IN',
+    {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  logEvents.unshift({time:now, msg, type});
+  if (logEvents.length > 100) logEvents.pop();
+  const el = document.getElementById('logBody');
+  el.innerHTML = logEvents.map(e =>
+    `<div class="log-entry ${e.type}">[${e.time}] ${e.msg}</div>`
+  ).join('');
+}
+
+function clearLog() { logEvents=[]; document.getElementById('logBody').innerHTML=''; }
+
+function setConnected(ok) {
+  connected = ok;
+  const ind   = document.getElementById('connIndicator');
+  const label = document.getElementById('connLabel');
+  ind.className   = 'conn-indicator ' + (ok ? 'ok' : 'err');
+  label.textContent = ok ? 'connected' : 'disconnected';
+  label.style.color = ok ? 'var(--green)' : 'var(--red)';
+}
+
+// ── CONNECTION CHECK ───────────────────────────────────────────────────────
+async function checkConnection() {
+  logAdd('Connecting to ' + apiBase() + ' …', 'info');
+  try {
+    const resp = await fetch(apiBase() + '/status', {signal: AbortSignal.timeout(5000)});
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    setConnected(true);
+    logAdd(`Connected ✓  TA-Lib:${data.talib} | Symbols:${data.symbols} | MIN_SCORE:${data.min_score} | R/R:${data.risk_reward}`, 'info');
+
+    // Update Nifty badge
+    const badge = document.getElementById('niftyBadge');
+    badge.textContent = 'NIFTY ' + data.nifty_trend.toUpperCase();
+    badge.className   = 'nifty-trend ' + data.nifty_trend;
+  } catch (e) {
+    setConnected(false);
+    logAdd('Connection failed: ' + e.message + ' — is api_server.py running?', 'err');
+  }
+}
+
+// ── FILTER / SORT ─────────────────────────────────────────────────────────
+function setFilter(f) {
+  displayFilter = f;
+  ['btnAll','btnBuy','btnSell'].forEach(id =>
+    document.getElementById(id).className = 'filter-btn ' + id.replace('btn','').toLowerCase()
+  );
+  const map = {ALL:'btnAll',BUY:'btnBuy',SELL:'btnSell'};
+  const cls = {ALL:'all',BUY:'buy',SELL:'sell'};
+  document.getElementById(map[f]).classList.add('active', cls[f]);
+  renderTable();
+}
+
+function sortBy(key) {
+  if (sortKey===key) sortDir*=-1; else { sortKey=key; sortDir=-1; }
+  document.querySelectorAll('th').forEach(th=>th.classList.remove('sorted'));
+  renderTable();
+}
+
+// ── SCORE BAR ─────────────────────────────────────────────────────────────
+function scoreBar(score) {
+  const dots = Array.from({length:13},(_,i)=>{
+    const filled = i<score;
+    const hi     = filled && score>=10;
+    return `<div class="dot ${filled?(hi?'high':'filled'):''}"></div>`;
+  }).join('');
+  return `<div class="score-bar"><div class="score-dots">${dots}</div>
+    <span style="color:${score>=10?'var(--green)':'var(--amber)'};margin-left:4px;">${score}/13</span></div>`;
+}
+
+// ── RENDER TABLE ──────────────────────────────────────────────────────────
+function renderTable() {
+  const minScore = parseInt(document.getElementById('minScore').value) || 0;
+  let filtered = allSignals.filter(s =>
+    (displayFilter==='ALL' || s.signal===displayFilter) && s.score>=minScore
+  );
+  filtered.sort((a,b) => {
+    const av=a[sortKey], bv=b[sortKey];
+    if (typeof av==='string') return sortDir*av.localeCompare(bv);
+    return sortDir*(av-bv);
+  });
+  document.getElementById('tableCount').textContent = filtered.length + ' signal' + (filtered.length===1?'':'s');
+  const body = document.getElementById('signalBody');
+  if (!filtered.length) {
+    body.innerHTML = `<tr><td colspan="12"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = filtered.map(r => {
+    const rsiColor  = r.rsi<40?'var(--green)':r.rsi>60?'var(--red)':'var(--text-dim)';
+    const adxColor  = r.adx>25?'var(--amber)':'var(--text-dim)';
+    const entryFmt  = parseFloat(r.entry).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const tgtFmt    = parseFloat(r.target).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const slFmt     = parseFloat(r.stop_loss).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    return `<tr>
+      <td><span class="ticker">${r.symbol}</span></td>
+      <td><span class="signal-pill ${r.signal}">${r.signal}</span></td>
+      <td><span class="price">₹${entryFmt}</span></td>
+      <td><span class="target-p">₹${tgtFmt}</span></td>
+      <td><span class="sl-p">₹${slFmt}</span></td>
+      <td style="color:${rsiColor}">${r.rsi}</td>
+      <td style="color:${adxColor}">${r.adx}</td>
+      <td>${scoreBar(r.score)}</td>
+      <td><span class="sentiment-badge ${r.sentiment}">${r.sentiment}</span></td>
+      <td style="color:var(--text-dim);font-size:10px;">${r.candle||'—'}</td>
+      <td class="time-cell">${r.time||''}</td>
+      <td class="reasons-cell" title="${r.reasons}">${r.reasons}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── UPDATE METRICS ────────────────────────────────────────────────────────
+function updateMetrics() {
+  const buys  = allSignals.filter(s=>s.signal==='BUY');
+  const sells = allSignals.filter(s=>s.signal==='SELL');
+  const high  = allSignals.filter(s=>s.score>=10);
+  const avg   = allSignals.length
+    ? (allSignals.reduce((a,s)=>a+s.score,0)/allSignals.length).toFixed(1) : '—';
+  document.getElementById('mTotal').textContent = allSignals.length || '—';
+  document.getElementById('mBuy').textContent   = buys.length  || '—';
+  document.getElementById('mSell').textContent  = sells.length || '—';
+  document.getElementById('mAvg').textContent   = avg;
+  document.getElementById('mHigh').textContent  = high.length  || '—';
+}
+
+// ── AUTO-SCAN ─────────────────────────────────────────────────────────────
+const AUTO_INTERVAL_SEC = 15 * 60;   // 15 minutes
+let autoEnabled      = false;
+let autoTimerId      = null;   // setInterval for countdown tick
+let autoSecondsLeft  = 0;
+
+function isMarketOpen() {
+  const d = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Kolkata'}));
+  const h = d.getHours(), m = d.getMinutes(), wd = d.getDay();
+  return wd>=1 && wd<=5 && (h>9||(h===9&&m>=15)) && (h<15||(h===15&&m<=30));
+}
+
+function toggleAutoScan() {
+  autoEnabled = !autoEnabled;
+  const wrap    = document.getElementById('autoWrap');
+  const track   = document.getElementById('toggleTrack');
+  const label   = document.getElementById('autoLabel');
+  const cdBadge = document.getElementById('countdown');
+
+  if (autoEnabled) {
+    wrap.classList.add('active');
+    track.classList.add('on');
+    label.textContent = 'Auto ON';
+    cdBadge.classList.add('visible');
+    logAdd('Auto-scan enabled — will scan every 15 min during market hours', 'warn');
+    scheduleNextAutoScan();
+  } else {
+    wrap.classList.remove('active');
+    track.classList.remove('on');
+    label.textContent = 'Auto 15 min';
+    cdBadge.classList.remove('visible');
+    cdBadge.textContent = '';
+    if (autoTimerId) { clearInterval(autoTimerId); autoTimerId = null; }
+    logAdd('Auto-scan disabled', 'warn');
+  }
+}
+
+function scheduleNextAutoScan() {
+  if (!autoEnabled) return;
+  if (autoTimerId) clearInterval(autoTimerId);
+
+  autoSecondsLeft = AUTO_INTERVAL_SEC;
+  updateCountdownDisplay();
+
+  autoTimerId = setInterval(() => {
+    if (!autoEnabled) { clearInterval(autoTimerId); return; }
+
+    autoSecondsLeft--;
+    updateCountdownDisplay();
+
+    if (autoSecondsLeft <= 0) {
+      clearInterval(autoTimerId);
+      autoTimerId = null;
+
+      if (!isMarketOpen()) {
+        logAdd('Auto-scan skipped — market is closed', 'warn');
+        scheduleNextAutoScan();
+        return;
+      }
+      if (!connected) {
+        logAdd('Auto-scan skipped — not connected to API', 'warn');
+        scheduleNextAutoScan();
+        return;
+      }
+
+      logAdd('Auto-scan triggered', 'info');
+      startScan(/*fromAuto=*/true);
+    }
+  }, 1000);
+}
+
+function updateCountdownDisplay() {
+  const badge = document.getElementById('countdown');
+  const m = String(Math.floor(autoSecondsLeft / 60)).padStart(2,'0');
+  const s = String(autoSecondsLeft % 60).padStart(2,'0');
+  badge.textContent = m + ':' + s;
+}
+
+// ── SCAN ──────────────────────────────────────────────────────────────────
+function startScan(fromAuto) {
+  if (!connected) {
+    logAdd('Not connected — click Connect first', 'warn');
+    return;
+  }
+  if (evtSource) { evtSource.close(); evtSource = null; }
+
+  allSignals = [];
+  updateMetrics();
+  renderTable();
+
+  const scanBtn = document.getElementById('scanBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const scanBar = document.getElementById('scanBar');
+  scanBtn.disabled = true;
+  stopBtn.style.display = 'inline-block';
+  scanBar.classList.add('active');
+
+  const symOverride = document.getElementById('symInput').value.trim();
+  const url = apiBase() + '/scan/stream' + (symOverride ? '?symbols=' + encodeURIComponent(symOverride) : '');
+
+  logAdd('Scan started via SSE stream…', 'info');
+  evtSource = new EventSource(url);
+
+  evtSource.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === 'start') {
+      document.getElementById('scanLabel').textContent = 'Scanning ' + msg.total + ' stocks…';
+      document.getElementById('niftyBadge').textContent = 'NIFTY ' + msg.nifty_trend.toUpperCase();
+      document.getElementById('niftyBadge').className   = 'nifty-trend ' + msg.nifty_trend;
+      logAdd('Nifty 50 trend: ' + msg.nifty_trend.toUpperCase(), 'info');
+    }
+
+    else if (msg.type === 'progress') {
+      const pct = Math.round(msg.index / msg.total * 100);
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('scanPct').textContent = pct + '%';
+      document.getElementById('scanLabel').textContent = 'Analyzing ' + msg.symbol + '…';
+    }
+
+    else if (msg.type === 'signal') {
+      allSignals.push(msg);
+      updateMetrics();
+      renderTable();
+      const icon = msg.signal==='BUY' ? '▲' : '▼';
+      logAdd(`${icon} ${msg.symbol} — ${msg.signal} | Score ${msg.score}/13 | ${msg.sentiment}`, msg.signal.toLowerCase());
+    }
+
+    else if (msg.type === 'done') {
+      logAdd(`Scan complete — ${msg.total_signals} signal(s) across ${msg.scanned} stocks`, 'info');
+      finishScan();
+    }
+
+    else if (msg.type === 'stopped') {
+      logAdd('Scan stopped by user', 'warn');
+      finishScan();
+    }
+
+    else if (msg.type === 'error') {
+      logAdd('Error: ' + msg.msg, 'err');
+      finishScan();
+    }
+  };
+
+  evtSource.onerror = () => {
+    logAdd('SSE connection error — check that api_server.py is running', 'err');
+    finishScan();
+  };
+}
+
+function finishScan() {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  document.getElementById('scanBtn').disabled      = false;
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('scanBar').classList.remove('active');
+  document.getElementById('progressFill').style.width = '0%';
+  // Restart countdown for next auto-scan if enabled
+  if (autoEnabled) scheduleNextAutoScan();
+}
+
+async function stopScan() {
+  logAdd('Sending stop signal…', 'warn');
+  try {
+    await fetch(apiBase() + '/scan/stop', {method:'POST'});
+  } catch(e) {
+    logAdd('Stop request failed: ' + e.message, 'err');
+  }
+}
+
+// ── PERSIST API URL ───────────────────────────────────────────────────────
+const apiInput = document.getElementById('apiUrl');
+
+// Auto-detect URL: if page is served from Render (not localhost/file),
+// use the same origin as the page itself (API and UI on same server)
+const isCloud = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && location.protocol !== 'file:';
+const defaultUrl = isCloud ? location.origin : 'http://localhost:8000';
+
+// Restore saved URL, or use auto-detected default
+const savedUrl = localStorage.getItem('swingscan_api_url') || defaultUrl;
+apiInput.value = savedUrl;
+
+// Save whenever user changes it
+apiInput.addEventListener('change', () => {
+  localStorage.setItem('swingscan_api_url', apiInput.value.trim());
+});
+
+// Auto-connect on load
+logAdd('API URL: ' + savedUrl + (isCloud ? ' (cloud)' : ' (local)'), 'info');
+checkConnection();
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+logAdd('SwingScan UI loaded — enter your API URL and click Connect', 'info');
+</script>
+</body>
+</html>
