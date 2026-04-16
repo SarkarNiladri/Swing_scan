@@ -123,11 +123,13 @@ EMA_LONG      = 50
 ADX_PERIOD    = 14
 ADX_THRESHOLD = 25
 ATR_PERIOD    = 14
-VOLUME_MULT   = 1.7
 SR_ZONE_PCT   = 0.015
 RISK_REWARD   = 2.0
 MIN_SCORE     = 9
 ATR_MULT      = 2.0
+
+# ── Background scheduler config ───────────────────────────────────────────
+AUTO_SCAN_INTERVAL = 15 * 60   # seconds between scans
 
 app = FastAPI(title="SwingScan API", version="1.0")
 
@@ -389,6 +391,15 @@ def get_stock_trend(symbol: str) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 
 def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
+    """
+    Improved signal logic:
+    1. Strategy unified to Trend + Pullback (no mean-reversion conflict)
+    2. Volume uses tiered scoring (+1/+2/+3) instead of hard filter
+    3. Context (market trend, stock trend, sentiment) uses score penalty not hard rejection
+    4. BB used for volatility squeeze detection not direct entry
+    5. RSI 40-60 continuation zone adds to trend score
+    6. Overextension check: avoid trades far from EMA
+    """
     try:
         df = yf.download(symbol + ".NS", period="60d", interval="15m",
                          progress=False, auto_adjust=True)
@@ -404,9 +415,11 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         _, _, macdh     = calc_macd(close_arr, close_s)
         df["MACDh"]     = macdh
         df["MACDh_prev"]= macdh.shift(1)
-        bbu, _, bbl     = calc_bbands(close_arr, close_s, BB_PERIOD, BB_STD)
+        bbu, bb_mid, bbl = calc_bbands(close_arr, close_s, BB_PERIOD, BB_STD)
         df["BB_Upper"]  = bbu
         df["BB_Lower"]  = bbl
+        df["BB_Mid"]    = bb_mid
+        df["BB_Width"]  = (bbu - bbl) / bb_mid   # volatility squeeze measure
         df["EMA_Short"] = calc_ema(close_arr, close_s, EMA_SHORT)
         df["EMA_Long"]  = calc_ema(close_arr, close_s, EMA_LONG)
         adx_s, _, _     = calc_adx(df)
@@ -425,22 +438,47 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         prev_macd = float(last.get("MACDh_prev", 0))
         bb_lower  = float(last.get("BB_Lower",  close))
         bb_upper  = float(last.get("BB_Upper",  close))
+        bb_width  = float(last.get("BB_Width",  0.02))
         ema_short = float(last.get("EMA_Short", close))
         ema_long  = float(last.get("EMA_Long",  close))
         adx       = float(last.get("ADX",           0))
         atr       = float(last.get("ATR", close*0.01))
 
-        avg_vol = df["Volume"].tail(20*26).mean()
-        if volume <= avg_vol * VOLUME_MULT:
-            return None
+        avg_vol   = df["Volume"].tail(20*26).mean()
+        vol_ratio = volume / avg_vol if avg_vol > 0 else 0
 
         buy_score = 0; sell_score = 0; reasons = []
 
-        if rsi < RSI_OVERSOLD:
-            buy_score += 2; reasons.append(f"RSI({rsi:.0f}) oversold")
-        elif rsi > (100 - RSI_OVERSOLD):
-            sell_score += 2; reasons.append(f"RSI({rsi:.0f}) overbought")
+        # ── 1. TREND (weighted +3) — Primary signal ────────────────────────
+        # EMA alignment is the foundation
+        if ema_short > ema_long:
+            buy_score += 2; reasons.append("EMA bullish")
+        else:
+            sell_score += 2; reasons.append("EMA bearish")
 
+        # ADX confirms trend strength (extra +1 on top of EMA)
+        if adx > ADX_THRESHOLD:
+            if ema_short > ema_long:
+                buy_score += 1
+            else:
+                sell_score += 1
+            reasons.append(f"ADX({adx:.0f}) strong trend")
+
+        # ── 2. PULLBACK ZONE (RSI 40-60 continuation) ─────────────────────
+        # In an uptrend, RSI pulling back to 40-55 is a good entry zone
+        # In a downtrend, RSI bouncing to 45-60 is a good short zone
+        if ema_short > ema_long:
+            if 35 <= rsi <= 55:
+                buy_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback zone")
+            elif rsi < 35:
+                buy_score += 1; reasons.append(f"RSI({rsi:.0f}) oversold")
+        else:
+            if 45 <= rsi <= 65:
+                sell_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback zone")
+            elif rsi > 65:
+                sell_score += 1; reasons.append(f"RSI({rsi:.0f}) overbought")
+
+        # ── 3. MACD MOMENTUM (+2) ─────────────────────────────────────────
         if macd_hist > 0 and prev_macd <= 0:
             buy_score += 2; reasons.append("MACD ↑ cross")
         elif macd_hist < 0 and prev_macd >= 0:
@@ -448,29 +486,41 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         elif macd_hist > 0:  buy_score  += 1
         elif macd_hist < 0:  sell_score += 1
 
-        if close <= bb_lower:
-            buy_score += 2; reasons.append("At BB lower")
-        elif close >= bb_upper:
-            sell_score += 2; reasons.append("At BB upper")
-
-        if ema_short > ema_long:
-            buy_score += 1; reasons.append("EMA bullish")
+        # ── 4. VOLUME TIERED SCORING (+1/+2/+3) ───────────────────────────
+        # No hard rejection — early breakouts get +1, strong moves get +3
+        if vol_ratio >= 2.0:
+            buy_score += 3; sell_score += 3; reasons.append(f"Vol {vol_ratio:.1f}x surge")
+        elif vol_ratio >= 1.5:
+            buy_score += 2; sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x high")
+        elif vol_ratio >= 1.2:
+            buy_score += 1; sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x above avg")
         else:
-            sell_score += 1; reasons.append("EMA bearish")
+            # Low volume — slight penalty, not rejection
+            buy_score -= 1; sell_score -= 1
 
-        if adx > ADX_THRESHOLD:
-            if ema_short > ema_long: buy_score  += 2
-            else:                    sell_score += 2
-            reasons.append(f"ADX({adx:.0f}) strong")
+        # ── 5. BOLLINGER BAND SQUEEZE (volatility setup) ──────────────────
+        # Narrow BB = compression = potential breakout coming
+        avg_bb_width = df["BB_Width"].tail(50).mean()
+        if bb_width < avg_bb_width * 0.8:
+            buy_score += 1; sell_score += 1; reasons.append("BB squeeze")
 
+        # ── 6. SUPPORT / RESISTANCE (+2) ──────────────────────────────────
         near_sup, near_res = find_sr_levels(df, close)
         if near_sup:  buy_score  += 2; reasons.append("Near support")
         if near_res:  sell_score += 2; reasons.append("Near resistance")
 
+        # ── 7. CANDLESTICK PATTERN (+2) ───────────────────────────────────
         bull_c, bear_c, c_name = detect_candle_pattern(df)
         if bull_c:   buy_score  += 2; reasons.append(c_name)
         elif bear_c: sell_score += 2; reasons.append(c_name)
 
+        # ── 8. OVEREXTENSION CHECK — penalise trades far from EMA ─────────
+        ema_dist_pct = abs(close - ema_short) / ema_short * 100
+        if ema_dist_pct > 3.0:
+            buy_score -= 1; sell_score -= 1
+            reasons.append(f"Extended {ema_dist_pct:.1f}% from EMA")
+
+        # ── Determine raw signal ───────────────────────────────────────────
         if buy_score >= MIN_SCORE:
             signal, score = "BUY", buy_score
         elif sell_score >= MIN_SCORE:
@@ -478,17 +528,37 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         else:
             return None
 
-        if signal == "BUY"  and nifty_trend == "bearish": return None
-        if signal == "SELL" and nifty_trend == "bullish": return None
+        # ── 9. CONTEXT — score penalty instead of hard rejection ──────────
+        penalty_reasons = []
 
+        # Market trend mismatch → -2 penalty
+        if signal == "BUY"  and nifty_trend == "bearish":
+            score -= 2; penalty_reasons.append("Nifty bearish(-2)")
+        elif signal == "SELL" and nifty_trend == "bullish":
+            score -= 2; penalty_reasons.append("Nifty bullish(-2)")
+
+        # Stock daily trend mismatch → -2 penalty
         stock_trend = get_stock_trend(symbol)
-        if signal == "BUY"  and stock_trend == "bearish": return None
-        if signal == "SELL" and stock_trend == "bullish": return None
+        if signal == "BUY"  and stock_trend == "bearish":
+            score -= 2; penalty_reasons.append("Stock trend bearish(-2)")
+        elif signal == "SELL" and stock_trend == "bullish":
+            score -= 2; penalty_reasons.append("Stock trend bullish(-2)")
 
+        # News sentiment → -1 penalty (softer than trend)
         _, sentiment_label = get_news_sentiment(symbol)
-        if signal == "BUY"  and sentiment_label == "Negative": return None
-        if signal == "SELL" and sentiment_label == "Positive": return None
+        if signal == "BUY"  and sentiment_label == "Negative":
+            score -= 1; penalty_reasons.append("News negative(-1)")
+        elif signal == "SELL" and sentiment_label == "Positive":
+            score -= 1; penalty_reasons.append("News positive(-1)")
 
+        if penalty_reasons:
+            reasons.append("Penalties: " + ", ".join(penalty_reasons))
+
+        # After penalties, re-check score threshold
+        if score < MIN_SCORE:
+            return None
+
+        # ── 10. STOP LOSS & TARGET ────────────────────────────────────────
         if signal == "BUY":
             stop_loss = round(close - ATR_MULT * atr, 2)
             target    = round(close + (close - stop_loss) * RISK_REWARD, 2)
@@ -496,19 +566,26 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             stop_loss = round(close + ATR_MULT * atr, 2)
             target    = round(close - (stop_loss - close) * RISK_REWARD, 2)
 
+        # Final RR sanity check
+        risk   = abs(close - stop_loss)
+        reward = abs(target - close)
+        if risk == 0 or reward / risk < RISK_REWARD * 0.9:
+            return None
+
         return {
-            "symbol":    symbol,
-            "signal":    signal,
-            "entry":     round(close, 2),
-            "target":    target,
-            "stop_loss": stop_loss,
-            "score":     score,
-            "rsi":       round(rsi, 1),
-            "adx":       round(adx, 1),
-            "sentiment": sentiment_label,
-            "candle":    c_name or "—",
-            "reasons":   " | ".join(reasons),
-            "time":      datetime.now(IST).strftime("%H:%M:%S IST"),
+            "symbol":     symbol,
+            "signal":     signal,
+            "entry":      round(close, 2),
+            "target":     target,
+            "stop_loss":  stop_loss,
+            "score":      score,
+            "rsi":        round(rsi, 1),
+            "adx":        round(adx, 1),
+            "vol_ratio":  round(vol_ratio, 1),
+            "sentiment":  sentiment_label,
+            "candle":     c_name or "—",
+            "reasons":    " | ".join(reasons),
+            "time":       datetime.now(IST).strftime("%H:%M:%S IST"),
         }
     except Exception:
         return None
@@ -524,6 +601,99 @@ def market_is_open() -> bool:
         return False
     t = (now.hour, now.minute)
     return MARKET_OPEN <= t <= MARKET_CLOSE
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# BACKGROUND SCHEDULER — runs scan every 15 min during market hours
+# Independent of browser/UI — fires Telegram alerts automatically
+# ════════════════════════════════════════════════════════════════════════════
+
+def run_background_scan():
+    """
+    Runs a full Nifty 100 scan in a background thread.
+    Sends Telegram notifications for new signals.
+    Respects the duplicate fingerprint filter.
+    """
+    if scan_state["running"]:
+        print("[scheduler] Scan already running — skipping this cycle")
+        return
+
+    print(f"[scheduler] Starting background scan at {datetime.now(IST).strftime('%H:%M:%S IST')}")
+    scan_state["running"]   = True
+    scan_state["stop_flag"] = False
+    scan_state["results"]   = []
+    scan_state["scanned"]   = 0
+    scan_state["total"]     = len(NIFTY100_SYMBOLS)
+
+    try:
+        nifty_trend  = get_nifty_trend()
+        signal_count = 0
+
+        for idx, symbol in enumerate(NIFTY100_SYMBOLS, 1):
+            if scan_state["stop_flag"]:
+                break
+
+            scan_state["scanned"] = idx
+            result = analyze_stock(symbol, nifty_trend)
+
+            if result:
+                signal_count += 1
+                scan_state["results"].append(result)
+
+                # Duplicate notification check
+                today = datetime.now(IST).date().isoformat()
+                if scan_state["notified_date"] != today:
+                    scan_state["notified_today"] = {}
+                    scan_state["notified_date"]  = today
+
+                fingerprint = (
+                    f"{result['symbol']}|{result['signal']}|"
+                    f"{result['entry']}|{result['target']}|{result['stop_loss']}"
+                )
+                if fingerprint not in scan_state["notified_today"]:
+                    scan_state["notified_today"][fingerprint] = today
+                    send_telegram(result)
+                    print(f"[scheduler] {result['signal']} signal: {result['symbol']} score={result['score']}")
+
+        scan_state["last_scan"] = datetime.now(IST).isoformat()
+        print(f"[scheduler] Scan complete — {signal_count} signal(s) found")
+
+    except Exception as e:
+        print(f"[scheduler] Error during scan: {e}")
+    finally:
+        scan_state["running"] = False
+
+
+def scheduler_loop():
+    """
+    Infinite loop that runs in a daemon thread.
+    Checks every minute if it's time to scan.
+    Scans every AUTO_SCAN_INTERVAL seconds during market hours.
+    """
+    last_scan_time = 0
+
+    while True:
+        try:
+            now_ts = datetime.now(IST).timestamp()
+            if market_is_open() and (now_ts - last_scan_time) >= AUTO_SCAN_INTERVAL:
+                last_scan_time = now_ts
+                run_background_scan()
+            else:
+                time_to_next = AUTO_SCAN_INTERVAL - (now_ts - last_scan_time)
+                if not market_is_open():
+                    pass  # market closed, just wait
+        except Exception as e:
+            print(f"[scheduler] Loop error: {e}")
+
+        import time as _time
+        _time.sleep(60)   # check every minute
+
+
+# Start background scheduler thread on server startup
+_scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True, name="SwingScan-Scheduler")
+_scheduler_thread.start()
+print("[scheduler] Background scheduler started — will scan every 15 min during market hours")
 
 
 # ════════════════════════════════════════════════════════════════════════════
