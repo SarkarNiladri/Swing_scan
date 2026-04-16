@@ -125,7 +125,7 @@ ADX_THRESHOLD = 25
 ATR_PERIOD    = 14
 SR_ZONE_PCT   = 0.015
 RISK_REWARD   = 2.0
-MIN_SCORE     = 9
+MIN_SCORE     = 7
 ATR_MULT      = 2.0
 
 # ── Background scheduler config ───────────────────────────────────────────
@@ -449,36 +449,45 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
 
         buy_score = 0; sell_score = 0; reasons = []
 
-        # ── 1. TREND (weighted +3) — Primary signal ────────────────────────
-        # EMA alignment is the foundation
+        # ════════════════════════════════════════════════════
+        # CORE SIGNALS (max ~9 points) — must all align
+        # ════════════════════════════════════════════════════
+
+        # ── CORE 1: TREND via EMA + ADX (max 3 pts) ──────────────────────
+        # EMA is the primary trend filter — highest weight
         if ema_short > ema_long:
-            buy_score += 2; reasons.append("EMA bullish")
+            buy_score += 3; reasons.append("EMA bullish")
         else:
-            sell_score += 2; reasons.append("EMA bearish")
+            sell_score += 3; reasons.append("EMA bearish")
 
-        # ADX confirms trend strength (extra +1 on top of EMA)
+        # ADX must confirm trend is actually moving
         if adx > ADX_THRESHOLD:
-            if ema_short > ema_long:
-                buy_score += 1
-            else:
-                sell_score += 1
-            reasons.append(f"ADX({adx:.0f}) strong trend")
+            if ema_short > ema_long: buy_score  += 2
+            else:                    sell_score += 2
+            reasons.append(f"ADX({adx:.0f})")
+        else:
+            # Weak trend — penalise
+            buy_score -= 1; sell_score -= 1
 
-        # ── 2. PULLBACK ZONE (RSI 40-60 continuation) ─────────────────────
-        # In an uptrend, RSI pulling back to 40-55 is a good entry zone
-        # In a downtrend, RSI bouncing to 45-60 is a good short zone
+        # ── CORE 2: PULLBACK via RSI (max 2 pts) ─────────────────────────
+        # Only reward RSI if it aligns with the trend direction
         if ema_short > ema_long:
             if 35 <= rsi <= 55:
-                buy_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback zone")
+                buy_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback")
             elif rsi < 35:
                 buy_score += 1; reasons.append(f"RSI({rsi:.0f}) oversold")
+            elif rsi > 70:
+                buy_score -= 1   # overbought in uptrend — bad entry
         else:
             if 45 <= rsi <= 65:
-                sell_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback zone")
+                sell_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback")
             elif rsi > 65:
                 sell_score += 1; reasons.append(f"RSI({rsi:.0f}) overbought")
+            elif rsi < 30:
+                sell_score -= 1  # oversold in downtrend — bad short entry
 
-        # ── 3. MACD MOMENTUM (+2) ─────────────────────────────────────────
+        # ── CORE 3: MACD CONFIRMATION (max 2 pts) ────────────────────────
+        # Only fresh crossovers get full +2; existing momentum gets +1
         if macd_hist > 0 and prev_macd <= 0:
             buy_score += 2; reasons.append("MACD ↑ cross")
         elif macd_hist < 0 and prev_macd >= 0:
@@ -486,35 +495,44 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         elif macd_hist > 0:  buy_score  += 1
         elif macd_hist < 0:  sell_score += 1
 
-        # ── 4. VOLUME TIERED SCORING (+1/+2/+3) ───────────────────────────
-        # No hard rejection — early breakouts get +1, strong moves get +3
+        # ── CORE 4: VOLUME (max 2 pts, tiered) ───────────────────────────
         if vol_ratio >= 2.0:
-            buy_score += 3; sell_score += 3; reasons.append(f"Vol {vol_ratio:.1f}x surge")
+            buy_score += 2; sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x surge")
         elif vol_ratio >= 1.5:
-            buy_score += 2; sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x high")
-        elif vol_ratio >= 1.2:
-            buy_score += 1; sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x above avg")
-        else:
-            # Low volume — slight penalty, not rejection
-            buy_score -= 1; sell_score -= 1
+            buy_score += 1; sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x")
+        elif vol_ratio < 1.0:
+            buy_score -= 1; sell_score -= 1  # below avg volume — penalty only
 
-        # ── 5. BOLLINGER BAND SQUEEZE (volatility setup) ──────────────────
-        # Narrow BB = compression = potential breakout coming
-        avg_bb_width = df["BB_Width"].tail(50).mean()
-        if bb_width < avg_bb_width * 0.8:
-            buy_score += 1; sell_score += 1; reasons.append("BB squeeze")
+        # ════════════════════════════════════════════════════
+        # OPTIONAL SIGNALS (max +2 combined) — supporting evidence
+        # ════════════════════════════════════════════════════
+        optional_score = 0
 
-        # ── 6. SUPPORT / RESISTANCE (+2) ──────────────────────────────────
+        # S/R proximity (+1 only, reduced from +2)
         near_sup, near_res = find_sr_levels(df, close)
-        if near_sup:  buy_score  += 2; reasons.append("Near support")
-        if near_res:  sell_score += 2; reasons.append("Near resistance")
+        if near_sup and ema_short > ema_long:
+            optional_score += 1; reasons.append("Near support")
+        if near_res and ema_short <= ema_long:
+            optional_score += 1; reasons.append("Near resistance")
 
-        # ── 7. CANDLESTICK PATTERN (+2) ───────────────────────────────────
+        # Candle pattern (+1 only, reduced from +2)
         bull_c, bear_c, c_name = detect_candle_pattern(df)
-        if bull_c:   buy_score  += 2; reasons.append(c_name)
-        elif bear_c: sell_score += 2; reasons.append(c_name)
+        if bull_c and ema_short > ema_long:
+            optional_score += 1; reasons.append(c_name)
+        elif bear_c and ema_short <= ema_long:
+            optional_score += 1; reasons.append(c_name)
 
-        # ── 8. OVEREXTENSION CHECK — penalise trades far from EMA ─────────
+        # BB squeeze bonus (+1 max — signals potential breakout)
+        avg_bb_width = df["BB_Width"].tail(50).mean()
+        if bb_width < avg_bb_width * 0.75:
+            optional_score += 1; reasons.append("BB squeeze")
+
+        # Cap optional contribution at +2 to prevent overfitting
+        optional_score = min(optional_score, 2)
+        buy_score  += optional_score
+        sell_score += optional_score
+
+        # ── OVEREXTENSION CHECK ───────────────────────────────────────────
         ema_dist_pct = abs(close - ema_short) / ema_short * 100
         if ema_dist_pct > 3.0:
             buy_score -= 1; sell_score -= 1

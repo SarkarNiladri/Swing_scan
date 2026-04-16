@@ -285,12 +285,89 @@
     .log-entry.warn    { color:var(--amber); }
     .log-entry.err     { color:var(--red); }
 
+    /* ── TICKER LINK ── */
+    .ticker-link {
+      font-weight:600; color:var(--blue); font-size:12px;
+      text-decoration:none; cursor:pointer;
+      border-bottom: 1px dashed var(--blue);
+      transition: color 0.15s;
+    }
+    .ticker-link:hover { color:var(--green); border-color:var(--green); }
+
+    /* ── TABS ── */
+    .tabs {
+      display:flex; gap:0; margin-bottom:12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-btn {
+      padding: 8px 20px; font-size:11px; font-family:var(--mono);
+      background:none; border:none; border-bottom:2px solid transparent;
+      color:var(--text-dim); cursor:pointer; margin-bottom:-1px;
+      transition: all 0.15s; text-transform:uppercase; letter-spacing:0.8px;
+    }
+    .tab-btn:hover { color:var(--text); }
+    .tab-btn.active { color:var(--blue); border-bottom-color:var(--blue); }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+
+    /* ── PERFORMANCE TRACKER ── */
+    .perf-grid {
+      display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:14px;
+    }
+    .perf-actions {
+      display:flex; gap:8px; margin-bottom:12px; align-items:center;
+    }
+    .outcome-btn {
+      padding:4px 12px; border-radius:4px; font-size:11px;
+      font-family:var(--mono); cursor:pointer; font-weight:600; border:1px solid;
+      transition:all 0.15s;
+    }
+    .outcome-btn.win  { background:var(--green-dim); border-color:var(--green); color:var(--green); }
+    .outcome-btn.loss { background:var(--red-dim);   border-color:var(--red);   color:var(--red); }
+    .outcome-btn.win:hover  { background:var(--green); color:#000; }
+    .outcome-btn.loss:hover { background:var(--red);   color:#fff; }
+    .outcome-btn.open { background:var(--amber-dim); border-color:var(--amber); color:var(--amber); }
+    .del-btn {
+      background:none; border:none; color:var(--text-muted); cursor:pointer;
+      font-size:14px; padding:0 4px; transition:color 0.15s;
+    }
+    .del-btn:hover { color:var(--red); }
+    .win-rate-bar {
+      height:6px; background:var(--border); border-radius:3px; overflow:hidden; margin-top:6px;
+    }
+    .win-rate-fill { height:100%; background:var(--green); border-radius:3px; transition:width 0.4s; }
+
+    /* ── CHART MODAL ── */
+    .chart-modal {
+      display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85);
+      z-index:1000; align-items:center; justify-content:center;
+    }
+    .chart-modal.open { display:flex; }
+    .chart-box {
+      background:var(--surface); border:1px solid var(--border2);
+      border-radius:8px; overflow:hidden; width:90vw; max-width:1100px;
+      height:80vh; display:flex; flex-direction:column;
+    }
+    .chart-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:10px 16px; border-bottom:1px solid var(--border);
+      font-size:12px; flex-shrink:0;
+    }
+    .chart-close {
+      background:none; border:none; color:var(--text-dim); font-size:20px;
+      cursor:pointer; transition:color 0.15s;
+    }
+    .chart-close:hover { color:var(--red); }
+    .chart-frame { flex:1; border:none; }
+
     /* ── RESPONSIVE ── */
     @media (max-width: 900px) {
       .metrics-row { grid-template-columns: repeat(3,1fr); }
+      .perf-grid   { grid-template-columns: repeat(3,1fr); }
     }
     @media (max-width: 600px) {
       .metrics-row { grid-template-columns: repeat(2,1fr); }
+      .perf-grid   { grid-template-columns: repeat(2,1fr); }
     }
   </style>
 </head>
@@ -378,6 +455,15 @@
     <button class="stop-btn" id="stopBtn" onclick="stopScan()">&#9632; STOP</button>
   </div>
 
+  <!-- TABS -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('signals')">&#9782; Signals</button>
+    <button class="tab-btn"        onclick="switchTab('tracker')">&#128200; Performance Tracker</button>
+  </div>
+
+  <!-- TAB: SIGNALS -->
+  <div class="tab-content active" id="tab-signals">
+
   <!-- SIGNAL TABLE -->
   <div class="table-wrap">
     <div class="table-header-bar">
@@ -426,6 +512,89 @@
       <span class="log-clear" onclick="clearLog()">clear</span>
     </div>
     <div class="log-body" id="logBody"></div>
+  </div>
+
+  </div><!-- end tab-signals -->
+
+  <!-- TAB: PERFORMANCE TRACKER -->
+  <div class="tab-content" id="tab-tracker">
+
+    <!-- Summary metrics -->
+    <div class="perf-grid" id="perfMetrics">
+      <div class="metric-card neutral">
+        <div class="metric-label">Total Trades</div>
+        <div class="metric-value blue" id="ptTotal">0</div>
+        <div class="metric-sub">logged</div>
+      </div>
+      <div class="metric-card green">
+        <div class="metric-label">Target Hit</div>
+        <div class="metric-value green" id="ptWins">0</div>
+        <div class="metric-sub">wins</div>
+      </div>
+      <div class="metric-card red">
+        <div class="metric-label">SL Hit</div>
+        <div class="metric-value red" id="ptLosses">0</div>
+        <div class="metric-sub">losses</div>
+      </div>
+      <div class="metric-card amber">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-value amber" id="ptWinRate">—</div>
+        <div class="metric-sub">
+          <div class="win-rate-bar"><div class="win-rate-fill" id="ptWinBar" style="width:0%"></div></div>
+        </div>
+      </div>
+      <div class="metric-card blue">
+        <div class="metric-label">Open Trades</div>
+        <div class="metric-value blue" id="ptOpen">0</div>
+        <div class="metric-sub">pending outcome</div>
+      </div>
+    </div>
+
+    <!-- Tracker table -->
+    <div class="table-wrap">
+      <div class="table-header-bar">
+        <span>Trade Log</span>
+        <span style="font-size:10px;color:var(--text-muted);">Click WIN / LOSS to record outcome. Data saved in browser.</span>
+      </div>
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:80px">Symbol</th>
+              <th style="width:55px">Signal</th>
+              <th style="width:65px">Entry ₹</th>
+              <th style="width:65px">Target ₹</th>
+              <th style="width:65px">SL ₹</th>
+              <th style="width:55px">Score</th>
+              <th style="width:75px">Time</th>
+              <th style="width:140px">Outcome</th>
+              <th style="width:30px"></th>
+            </tr>
+          </thead>
+          <tbody id="trackerBody">
+            <tr><td colspan="9"><div class="empty-state"><div class="icon">&#128200;</div>Signals will appear here automatically. Mark each as WIN or LOSS after the trade.</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- end tab-tracker -->
+
+  <!-- CHART MODAL -->
+  <div class="chart-modal" id="chartModal" onclick="closeChart(event)">
+    <div class="chart-box">
+      <div class="chart-header">
+        <span id="chartTitle" style="font-weight:600;color:var(--text);">Chart</span>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <a id="tvLink" href="#" target="_blank"
+             style="font-size:10px;color:var(--blue);text-decoration:none;">
+            Open in TradingView ↗
+          </a>
+          <button class="chart-close" onclick="document.getElementById('chartModal').classList.remove('open')">&#10005;</button>
+        </div>
+      </div>
+      <iframe class="chart-frame" id="chartFrame" src="" allowtransparency="true" frameborder="0"></iframe>
+    </div>
   </div>
 
 </div>
@@ -558,7 +727,7 @@ function renderTable() {
     const tgtFmt    = parseFloat(r.target).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     const slFmt     = parseFloat(r.stop_loss).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     return `<tr>
-      <td><span class="ticker">${r.symbol}</span></td>
+      <td><a class="ticker-link" onclick="openChart('${r.symbol}','${r.signal}')" title="Open TradingView chart">${r.symbol} &#8599;</a></td>
       <td><span class="signal-pill ${r.signal}">${r.signal}</span></td>
       <td><span class="price">₹${entryFmt}</span></td>
       <td><span class="target-p">₹${tgtFmt}</span></td>
@@ -712,6 +881,7 @@ function startScan(fromAuto) {
       allSignals.push(msg);
       updateMetrics();
       renderTable();
+      addTradeToTracker(msg);   // auto-log to performance tracker
       const icon = msg.signal==='BUY' ? '▲' : '▼';
       logAdd(`${icon} ${msg.symbol} — ${msg.signal} | Score ${msg.score}/13 | ${msg.sentiment}`, msg.signal.toLowerCase());
     }
@@ -778,8 +948,138 @@ apiInput.addEventListener('change', () => {
 logAdd('API URL: ' + savedUrl + (isCloud ? ' (cloud)' : ' (local)'), 'info');
 checkConnection();
 
+// ── TABS ─────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    if (b.textContent.toLowerCase().includes(name === 'signals' ? 'signal' : 'perf')) b.classList.add('active');
+  });
+  if (name === 'tracker') renderTracker();
+}
+
+// ── TRADINGVIEW CHART ─────────────────────────────────────────────────────
+function openChart(symbol, signal) {
+  const tvSymbol = 'NSE:' + symbol;
+  const color    = signal === 'BUY' ? '26a69a' : 'ef5350';
+  const url = `https://www.tradingview.com/widgetbar-chart/?symbol=${tvSymbol}&interval=15&theme=dark&style=1&locale=en&toolbar_bg=111620&hide_side_toolbar=0&allow_symbol_change=0&save_image=0&studies=RSI%40tv-basicstudies;MACD%40tv-basicstudies;EMA%4020%3Binputs%3D(20);EMA%4050%3Binputs%3D(50)`;
+  const tvUrl = `https://www.tradingview.com/chart/?symbol=${tvSymbol}&interval=15`;
+  document.getElementById('chartTitle').textContent = symbol + ' — 15 min Chart';
+  document.getElementById('chartFrame').src = url;
+  document.getElementById('tvLink').href = tvUrl;
+  document.getElementById('chartModal').classList.add('open');
+}
+
+function closeChart(e) {
+  if (e.target === document.getElementById('chartModal')) {
+    document.getElementById('chartModal').classList.remove('open');
+    document.getElementById('chartFrame').src = '';
+  }
+}
+
+// ── PERFORMANCE TRACKER ───────────────────────────────────────────────────
+const TRACKER_KEY = 'swingscan_tracker';
+
+function loadTrades() {
+  try {
+    return JSON.parse(localStorage.getItem(TRACKER_KEY) || '[]');
+  } catch { return []; }
+}
+
+function saveTrades(trades) {
+  localStorage.setItem(TRACKER_KEY, JSON.stringify(trades));
+}
+
+function addTradeToTracker(signal) {
+  const trades = loadTrades();
+  const id = signal.symbol + '_' + signal.signal + '_' + signal.entry + '_' + (signal.time || Date.now());
+  // Avoid duplicate entries
+  if (trades.find(t => t.id === id)) return;
+  trades.unshift({
+    id,
+    symbol:    signal.symbol,
+    signal:    signal.signal,
+    entry:     signal.entry,
+    target:    signal.target,
+    stop_loss: signal.stop_loss,
+    score:     signal.score,
+    time:      signal.time || '',
+    outcome:   'OPEN',
+    added:     new Date().toISOString(),
+  });
+  saveTrades(trades);
+  renderTracker();
+  updateTrackerMetrics();
+}
+
+function setOutcome(id, outcome) {
+  const trades = loadTrades();
+  const t = trades.find(t => t.id === id);
+  if (t) { t.outcome = outcome; saveTrades(trades); renderTracker(); updateTrackerMetrics(); }
+}
+
+function deleteTrade(id) {
+  const trades = loadTrades().filter(t => t.id !== id);
+  saveTrades(trades); renderTracker(); updateTrackerMetrics();
+}
+
+function updateTrackerMetrics() {
+  const trades  = loadTrades();
+  const wins    = trades.filter(t => t.outcome === 'WIN');
+  const losses  = trades.filter(t => t.outcome === 'LOSS');
+  const open    = trades.filter(t => t.outcome === 'OPEN');
+  const closed  = wins.length + losses.length;
+  const winRate = closed > 0 ? Math.round(wins.length / closed * 100) : 0;
+  document.getElementById('ptTotal').textContent   = trades.length;
+  document.getElementById('ptWins').textContent    = wins.length;
+  document.getElementById('ptLosses').textContent  = losses.length;
+  document.getElementById('ptOpen').textContent    = open.length;
+  document.getElementById('ptWinRate').textContent = closed > 0 ? winRate + '%' : '—';
+  document.getElementById('ptWinBar').style.width  = winRate + '%';
+}
+
+function renderTracker() {
+  const trades = loadTrades();
+  const body   = document.getElementById('trackerBody');
+  if (!trades.length) {
+    body.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div class="icon">&#128200;</div>No trades logged yet. Signals appear here automatically.</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = trades.map(t => {
+    const entFmt = parseFloat(t.entry).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const tgtFmt = parseFloat(t.target).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const slFmt  = parseFloat(t.stop_loss).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const sigCol = t.signal === 'BUY' ? 'var(--green)' : 'var(--red)';
+    let outcomeHtml = '';
+    if (t.outcome === 'OPEN') {
+      outcomeHtml = `
+        <button class="outcome-btn win"  onclick="setOutcome('${t.id}','WIN')">&#10003; WIN</button>
+        <button class="outcome-btn loss" onclick="setOutcome('${t.id}','LOSS')">&#10007; LOSS</button>`;
+    } else if (t.outcome === 'WIN') {
+      outcomeHtml = `<span style="color:var(--green);font-weight:600;">&#10003; TARGET HIT</span>`;
+    } else {
+      outcomeHtml = `<span style="color:var(--red);font-weight:600;">&#10007; SL HIT</span>`;
+    }
+    const idSafe = t.id.replace(/[^a-zA-Z0-9_]/g, '_');
+    return `<tr>
+      <td><a class="ticker-link" onclick="openChart('${t.symbol}','${t.signal}')">${t.symbol} &#8599;</a></td>
+      <td><span class="signal-pill ${t.signal}">${t.signal}</span></td>
+      <td class="price">₹${entFmt}</td>
+      <td class="target-p">₹${tgtFmt}</td>
+      <td class="sl-p">₹${slFmt}</td>
+      <td style="color:var(--amber)">${t.score}/13</td>
+      <td class="time-cell">${t.time}</td>
+      <td style="display:flex;gap:6px;align-items:center;padding:6px 10px;">${outcomeHtml}</td>
+      <td><button class="del-btn" onclick="deleteTrade('${t.id}')" title="Remove">&#10005;</button></td>
+    </tr>`;
+  }).join('');
+  updateTrackerMetrics();
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────
 logAdd('SwingScan UI loaded — enter your API URL and click Connect', 'info');
+updateTrackerMetrics();
 </script>
 </body>
 </html>
