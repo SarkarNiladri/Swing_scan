@@ -36,6 +36,14 @@ import httpx
 import pandas as pd
 import numpy as np
 
+# ── Try importing KiteConnect ──────────────────────────────────────────────
+try:
+    from kiteconnect import KiteConnect
+    KITE_AVAILABLE = True
+except ImportError:
+    KITE_AVAILABLE = False
+    print("[kite] kiteconnect not installed — pip install kiteconnect")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
@@ -61,6 +69,121 @@ except ImportError:
 TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+
+# ── Zerodha Kite Connect Config ────────────────────────────────────────────
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
+
+# Kite session state — access token valid for one trading day
+kite_state = {
+    "access_token": None,
+    "token_date":   None,   # date when token was generated
+    "kite":         None,   # KiteConnect instance
+    "login_url":    None,   # one-time login URL shown to user
+}
+
+
+def kite_get() -> "KiteConnect | None":
+    """
+    Returns an authenticated KiteConnect instance if token is valid today.
+    Returns None if not logged in yet.
+    """
+    if not KITE_AVAILABLE:
+        return None
+    today = datetime.now(IST).date().isoformat()
+    if kite_state["access_token"] and kite_state["token_date"] == today:
+        return kite_state["kite"]
+    return None
+
+
+def kite_set_token(access_token: str):
+    """Store access token and create KiteConnect session."""
+    if not KITE_AVAILABLE:
+        return False
+    try:
+        kite = KiteConnect(api_key=KITE_API_KEY)
+        kite.set_access_token(access_token)
+        # Verify token works
+        profile = kite.profile()
+        kite_state["access_token"] = access_token
+        kite_state["token_date"]   = datetime.now(IST).date().isoformat()
+        kite_state["kite"]         = kite
+        print(f"[kite] Logged in as {profile.get('user_name','?')} — token valid today")
+        return True
+    except Exception as e:
+        print(f"[kite] Token error: {e}")
+        return False
+
+
+def kite_get_login_url() -> str:
+    """Generate and cache the Kite login URL."""
+    if not KITE_AVAILABLE:
+        return ""
+    kite = KiteConnect(api_key=KITE_API_KEY)
+    url  = kite.login_url()
+    kite_state["login_url"] = url
+    return url
+
+
+def kite_get_quote(symbol: str) -> dict | None:
+    """
+    Fetch live quote for a symbol using Kite.
+    Returns dict with last_price, high, low, close or None on failure.
+    """
+    kite = kite_get()
+    if not kite:
+        return None
+    try:
+        instrument = f"NSE:{symbol}"
+        quote = kite.quote([instrument])
+        data  = quote.get(instrument, {})
+        ohlc  = data.get("ohlc", {})
+        return {
+            "last_price": data.get("last_price", 0),
+            "high":       ohlc.get("high", 0),
+            "low":        ohlc.get("low",  0),
+            "close":      ohlc.get("close",0),
+            "volume":     data.get("volume", 0),
+        }
+    except Exception as e:
+        print(f"[kite] Quote error {symbol}: {e}")
+        return None
+
+
+def kite_get_candles(symbol: str, days: int = 2) -> pd.DataFrame | None:
+    """
+    Fetch 15-min historical candles via Kite (much more accurate than yfinance).
+    Falls back to yfinance if Kite not available.
+    """
+    kite = kite_get()
+    if not kite:
+        return None
+    try:
+        from datetime import timedelta
+        instrument_token = None
+        # Get instrument token for the symbol
+        instruments = kite.instruments("NSE")
+        for inst in instruments:
+            if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
+                instrument_token = inst["instrument_token"]
+                break
+        if not instrument_token:
+            return None
+        to_date   = datetime.now(IST)
+        from_date = to_date - timedelta(days=days)
+        records   = kite.historical_data(
+            instrument_token, from_date, to_date, "15minute"
+        )
+        if not records:
+            return None
+        df = pd.DataFrame(records)
+        df.rename(columns={"date":"Date","open":"Open","high":"High",
+                            "low":"Low","close":"Close","volume":"Volume"}, inplace=True)
+        df.set_index("Date", inplace=True)
+        return df
+    except Exception as e:
+        print(f"[kite] Candles error {symbol}: {e}")
+        return None
 
 
 def send_telegram(signal: dict):
@@ -125,7 +248,7 @@ ADX_THRESHOLD = 25
 ATR_PERIOD    = 14
 SR_ZONE_PCT   = 0.015
 RISK_REWARD   = 2.0
-MIN_SCORE     = 9
+MIN_SCORE     = 7
 ATR_MULT      = 2.0
 
 # ── Background scheduler config ───────────────────────────────────────────
@@ -677,90 +800,114 @@ def add_trade(signal: dict):
     print(f"[tracker] Added {signal['signal']} trade: {signal['symbol']}")
 
 
+def resolve_trade_outcome(trade: dict, df: pd.DataFrame) -> tuple:
+    """
+    Given a candle DataFrame, check if target or SL was hit using
+    CLOSING PRICE CONFIRMATION — requires candle to CLOSE beyond the
+    level (not just wick), eliminating false triggers from spikes.
+
+    Returns (outcome, pnl_pct) or (None, None) if neither hit yet.
+    """
+    entry     = float(trade["entry"])
+    target    = float(trade["target"])
+    stop_loss = float(trade["stop_loss"])
+    signal    = trade["signal"]
+
+    # Walk candle by candle — use CLOSE not High/Low for confirmation
+    # This is the key fix: a candle must CLOSE beyond the level
+    for _, row in df.iterrows():
+        close = float(row["Close"])
+        high  = float(row["High"])
+        low   = float(row["Low"])
+
+        if signal == "BUY":
+            # SL: candle closes below stop_loss (confirmed, not a wick)
+            if close <= stop_loss:
+                return "LOSS", round((stop_loss - entry) / entry * 100, 2)
+            # Target: candle high touches or exceeds target (target is profit, ok to use high)
+            if high >= target:
+                return "WIN",  round((target - entry) / entry * 100, 2)
+        else:  # SELL
+            # SL: candle closes above stop_loss
+            if close >= stop_loss:
+                return "LOSS", round((entry - stop_loss) / entry * 100, 2)
+            # Target: candle low touches or goes below target
+            if low <= target:
+                return "WIN",  round((entry - target) / entry * 100, 2)
+
+    return None, None
+
+
+def notify_outcome(trade: dict, outcome: str, pnl_pct: float):
+    """Send Telegram message when a trade outcome is resolved."""
+    icon  = "✅" if outcome == "WIN" else "❌"
+    entry = float(trade["entry"])
+    lines = [
+        f"{icon} *{outcome} — {trade['symbol']} {trade['signal']}*",
+        "",
+        f"Entry  : Rs {entry:,.2f}",
+        f"Target : Rs {float(trade['target']):,.2f}",
+        f"SL     : Rs {float(trade['stop_loss']):,.2f}",
+        f"P&L    : {pnl_pct:+.2f}%",
+        f"Time   : {trade.get('resolved_at','')}",
+    ]
+    msg = "\n".join(lines)
+    try:
+        httpx.post(
+            TELEGRAM_API_URL,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[tracker] Telegram error: {e}")
+
+
 def check_open_trades():
     """
-    For every OPEN trade, fetch latest candles and check if
-    target or SL has been hit. Updates outcome in-place.
-    Sends Telegram notification when resolved.
+    For every OPEN trade:
+    1. Try Kite Connect first — accurate candles + closing price confirmation
+    2. Fall back to yfinance if Kite not logged in
+    Uses CLOSE-based SL confirmation to avoid wick false triggers.
     """
     reset_tracker_if_new_week()
     open_trades = [t for t in trade_tracker["trades"] if t["outcome"] == "OPEN"]
     if not open_trades:
         return
 
-    print(f"[tracker] Checking {len(open_trades)} open trade(s)...")
+    kite_active = kite_get() is not None
+    print(f"[tracker] Checking {len(open_trades)} open trade(s) — Kite: {'YES' if kite_active else 'NO (yfinance fallback)'}")
 
     for trade in open_trades:
         try:
-            ticker = trade["symbol"] + ".NS"
-            # Fetch last 2 days of 15-min candles
-            df = yf.download(ticker, period="2d", interval="15m",
-                             progress=False, auto_adjust=True)
+            df = None
+
+            # ── Try Kite first ────────────────────────────────────────────
+            if kite_active:
+                df = kite_get_candles(trade["symbol"], days=2)
+
+            # ── Fall back to yfinance ─────────────────────────────────────
+            if df is None or len(df) == 0:
+                raw = yf.download(trade["symbol"] + ".NS", period="2d",
+                                  interval="15m", progress=False, auto_adjust=True)
+                if raw is not None and len(raw) > 0:
+                    raw.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
+                    raw.dropna(inplace=True)
+                    df = raw
+
             if df is None or len(df) == 0:
                 continue
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            df.dropna(inplace=True)
 
-            entry     = float(trade["entry"])
-            target    = float(trade["target"])
-            stop_loss = float(trade["stop_loss"])
-            signal    = trade["signal"]
-
-            # Only look at candles after the trade was added
-            # (use last 26 candles ≈ 1 trading day as window)
-            recent = df.tail(26)
-
-            outcome = None
-            for _, row in recent.iterrows():
-                high  = float(row["High"])
-                low   = float(row["Low"])
-                close = float(row["Close"])
-
-                if signal == "BUY":
-                    if low <= stop_loss:
-                        outcome = "LOSS"
-                        pnl_pct = round((stop_loss - entry) / entry * 100, 2)
-                        break
-                    if high >= target:
-                        outcome = "WIN"
-                        pnl_pct = round((target - entry) / entry * 100, 2)
-                        break
-                else:  # SELL
-                    if high >= stop_loss:
-                        outcome = "LOSS"
-                        pnl_pct = round((entry - stop_loss) / entry * 100, 2)
-                        break
-                    if low <= target:
-                        outcome = "WIN"
-                        pnl_pct = round((entry - target) / entry * 100, 2)
-                        break
+            # Only check last 26 candles (1 trading day)
+            df = df.tail(26)
+            outcome, pnl_pct = resolve_trade_outcome(trade, df)
 
             if outcome:
                 trade["outcome"]     = outcome
                 trade["pnl_pct"]     = pnl_pct
                 trade["resolved_at"] = datetime.now(IST).strftime("%H:%M:%S IST")
-                print(f"[tracker] {trade['symbol']} → {outcome} ({pnl_pct:+.2f}%)")
-
-                # Telegram notification for outcome
-                icon = "✅" if outcome == "WIN" else "❌"
-                lines = [
-                    f"{icon} *{outcome} — {trade['symbol']} {signal}*",
-                    "",
-                    f"Entry  : Rs {entry:,.2f}",
-                    f"Target : Rs {target:,.2f}",
-                    f"SL     : Rs {stop_loss:,.2f}",
-                    f"P&L    : {pnl_pct:+.2f}%",
-                    f"Time   : {trade['resolved_at']}",
-                ]
-                msg = "\n".join(lines)
-                try:
-                    httpx.post(
-                        TELEGRAM_API_URL,
-                        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
-                        timeout=10,
-                    )
-                except Exception as e:
-                    print(f"[tracker] Telegram error: {e}")
+                source = "Kite" if kite_active else "yfinance"
+                print(f"[tracker] {trade['symbol']} → {outcome} ({pnl_pct:+.2f}%) via {source}")
+                threading.Thread(target=notify_outcome, args=(trade, outcome, pnl_pct), daemon=True).start()
 
         except Exception as e:
             print(f"[tracker] Error checking {trade['symbol']}: {e}")
@@ -1000,6 +1147,84 @@ async def scan_stop():
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return {"ping": "pong", "time": datetime.now(IST).isoformat()}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# KITE CONNECT AUTH ROUTES
+# ════════════════════════════════════════════════════════════════════════════
+
+@app.get("/kite/login")
+async def kite_login():
+    """
+    Returns the Zerodha login URL.
+    Open this URL in browser → login → you land on redirect with request_token.
+    Pass that token to /kite/callback?token=XXX
+    """
+    if not KITE_AVAILABLE:
+        return JSONResponse({"error": "kiteconnect not installed"}, status_code=500)
+    url = kite_get_login_url()
+    return JSONResponse({"login_url": url, "instructions":
+        "Open login_url in browser. After login, copy the request_token from the URL and call /kite/callback?token=YOUR_TOKEN"})
+
+
+@app.get("/kite/callback")
+async def kite_callback(token: str = "", request_token: str = ""):
+    """
+    After Zerodha login, the redirect URL contains ?request_token=XXX
+    This endpoint exchanges it for an access token.
+    Works both ways:
+      /kite/callback?token=XXX
+      /kite/callback?request_token=XXX  (direct Zerodha redirect)
+    """
+    if not KITE_AVAILABLE:
+        return JSONResponse({"error": "kiteconnect not installed"}, status_code=500)
+
+    req_token = token or request_token
+    if not req_token:
+        return JSONResponse({"error": "No token provided. Use ?token=YOUR_REQUEST_TOKEN"}, status_code=400)
+
+    try:
+        kite = KiteConnect(api_key=KITE_API_KEY)
+        session = kite.generate_session(req_token, api_secret=KITE_API_SECRET)
+        access_token = session["access_token"]
+        success = kite_set_token(access_token)
+        if success:
+            profile = kite_state["kite"].profile()
+            name    = profile.get("user_name", "?")
+            return JSONResponse({
+                "status":  "success",
+                "message": f"Logged in as {name}. Kite active for today.",
+                "user":    name,
+                "date":    kite_state["token_date"],
+            })
+        else:
+            return JSONResponse({"error": "Token set failed"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/kite/status")
+async def kite_status():
+    """Check if Kite is authenticated for today."""
+    kite = kite_get()
+    today = datetime.now(IST).date().isoformat()
+    if kite:
+        try:
+            profile = kite.profile()
+            return JSONResponse({
+                "logged_in":  True,
+                "user":       profile.get("user_name", "?"),
+                "token_date": kite_state["token_date"],
+                "valid":      kite_state["token_date"] == today,
+            })
+        except Exception:
+            pass
+    login_url = kite_get_login_url() if KITE_AVAILABLE else ""
+    return JSONResponse({
+        "logged_in":  False,
+        "login_url":  login_url,
+        "message":    "Open login_url to authenticate. Then call /kite/callback?token=REQUEST_TOKEN",
+    })
 
 
 @app.get("/tracker/trades")

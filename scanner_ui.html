@@ -386,6 +386,12 @@
         <div class="status-dot" id="statusDot"></div>
         <span id="statusText" style="color:var(--text-dim);">—</span>
       </div>
+      <div id="kiteStatus"
+           style="font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer;
+                  border:1px solid var(--border2);color:var(--text-muted);"
+           onclick="checkKiteStatus()" title="Click to refresh Kite status">
+        Kite —
+      </div>
       <div class="clock" id="clock">--:--:-- IST</div>
     </div>
   </div>
@@ -675,6 +681,8 @@ async function checkConnection() {
 
     // Start polling tracker for outcome updates
     startTrackerPolling();
+    // Check Kite login status
+    checkKiteStatus();
   } catch (e) {
     setConnected(false);
     logAdd('Connection failed: ' + e.message + ' — is api_server.py running?', 'err');
@@ -1089,6 +1097,63 @@ function renderTracker() {
       <td></td>
     </tr>`;
   }).join('');
+}
+
+// ── KITE CONNECT STATUS ───────────────────────────────────────────────────
+async function checkKiteStatus() {
+  if (!connected) return;
+  try {
+    const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(5000)});
+    const data = await resp.json();
+    const el   = document.getElementById('kiteStatus');
+    if (data.logged_in && data.valid) {
+      el.textContent = 'Kite ✓ ' + (data.user || '');
+      el.style.background   = 'var(--green-dim)';
+      el.style.borderColor  = 'var(--green)';
+      el.style.color        = 'var(--green)';
+      logAdd('Kite connected — accurate candle data active', 'info');
+    } else {
+      el.textContent = 'Kite LOGIN';
+      el.style.background   = 'var(--amber-dim)';
+      el.style.borderColor  = 'var(--amber)';
+      el.style.color        = 'var(--amber)';
+      if (data.login_url) {
+        const go = confirm(
+          'Kite not logged in. Open Zerodha login page now?\n\n' +
+          'After login, copy the request_token from the redirect URL and paste it here.'
+        );
+        if (go) {
+          window.open(data.login_url, '_blank');
+          setTimeout(() => {
+            const token = prompt(
+              'Paste the request_token from the Zerodha redirect URL:\n' +
+              '(it appears as ?request_token=XXXXX in the URL after login)'
+            );
+            if (token && token.trim()) {
+              submitKiteToken(token.trim());
+            }
+          }, 3000);
+        }
+      }
+    }
+  } catch(e) {
+    logAdd('Kite status check failed: ' + e.message, 'warn');
+  }
+}
+
+async function submitKiteToken(token) {
+  try {
+    const resp = await fetch(apiBase() + '/kite/callback?token=' + encodeURIComponent(token));
+    const data = await resp.json();
+    if (data.status === 'success') {
+      logAdd('Kite login successful — ' + data.message, 'info');
+      checkKiteStatus();
+    } else {
+      logAdd('Kite login failed: ' + (data.error || 'Unknown error'), 'err');
+    }
+  } catch(e) {
+    logAdd('Kite token submit failed: ' + e.message, 'err');
+  }
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────
