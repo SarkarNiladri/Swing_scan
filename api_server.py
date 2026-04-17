@@ -44,7 +44,7 @@ except ImportError:
     KITE_AVAILABLE = False
     print("[kite] kiteconnect not installed — pip install kiteconnect")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -256,12 +256,41 @@ AUTO_SCAN_INTERVAL = 15 * 60   # seconds between scans
 
 app = FastAPI(title="SwingScan API", version="1.0")
 
+# ── CORS — only allow requests from your own Render domain ─────────────────
+ALLOWED_ORIGINS = [
+    "https://swing-scan.onrender.com",
+    "http://localhost:8000",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "null",   # file:// origin when opening HTML locally
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your domain in production
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# ── API Password Auth ──────────────────────────────────────────────────────
+# Set API_PASSWORD in Render environment variables.
+# If not set, auth is disabled (for local dev convenience).
+API_PASSWORD = os.environ.get("API_PASSWORD", "")
+
+
+def verify_auth(request: Request):
+    """
+    Dependency — checks X-API-Key header or ?api_key= query param.
+    Skips check if API_PASSWORD is not configured (local dev mode).
+    Public routes (/, /ping, /kite/login, /kite/callback) skip this check.
+    """
+    if not API_PASSWORD:
+        return True   # auth disabled locally
+    # Accept from header or query param
+    key = (request.headers.get("X-API-Key", "")
+           or request.query_params.get("api_key", ""))
+    if key != API_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized — invalid API key")
+    return True
 
 # ── Shared scan state ──────────────────────────────────────────────────────
 scan_state = {
@@ -1016,7 +1045,7 @@ print("[scheduler] Background scheduler started — will scan every 15 min durin
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/status")
-async def status():
+async def status(auth: bool = Depends(verify_auth)):
     """Quick health check + market state + Nifty trend."""
     ist_now = datetime.now(IST).strftime("%d %b %Y %H:%M:%S IST")
     loop = asyncio.get_event_loop()
@@ -1034,7 +1063,7 @@ async def status():
 
 
 @app.get("/scan/stream")
-async def scan_stream(symbols: str = ""):
+async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
     """
     SSE endpoint — streams scan progress and signals in real time.
     Query param: ?symbols=RELIANCE,TCS   (blank = full Nifty 100)
@@ -1124,7 +1153,7 @@ async def scan_stream(symbols: str = ""):
 
 
 @app.get("/scan/result")
-async def scan_result():
+async def scan_result(auth: bool = Depends(verify_auth)):
     """Returns the results of the most recently completed scan."""
     return JSONResponse({
         "results":   scan_state["results"],
@@ -1136,7 +1165,7 @@ async def scan_result():
 
 
 @app.post("/scan/stop")
-async def scan_stop():
+async def scan_stop(auth: bool = Depends(verify_auth)):
     """Signals the running scan to stop after the current stock."""
     if not scan_state["running"]:
         return {"stopped": False, "msg": "No scan running"}
@@ -1265,7 +1294,7 @@ async def kite_callback(token: str = "", request_token: str = "", action: str = 
 
 
 @app.get("/kite/status")
-async def kite_status():
+async def kite_status(auth: bool = Depends(verify_auth)):
     """Check if Kite is authenticated for today."""
     kite = kite_get()
     today = datetime.now(IST).date().isoformat()
@@ -1289,7 +1318,7 @@ async def kite_status():
 
 
 @app.get("/tracker/trades")
-async def tracker_trades():
+async def tracker_trades(auth: bool = Depends(verify_auth)):
     """Returns all trades for the current week with their outcomes."""
     reset_tracker_if_new_week()
     return JSONResponse({
@@ -1303,7 +1332,7 @@ async def tracker_trades():
 
 
 @app.post("/tracker/reset")
-async def tracker_reset():
+async def tracker_reset(auth: bool = Depends(verify_auth)):
     """Manually reset the trade tracker."""
     trade_tracker["trades"]     = []
     trade_tracker["week_start"] = get_week_start()

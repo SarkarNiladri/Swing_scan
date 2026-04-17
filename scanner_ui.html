@@ -400,6 +400,10 @@
   <div class="api-bar">
     <label>API URL</label>
     <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000" />
+    <label style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;white-space:nowrap;">Password</label>
+    <input type="password" id="apiPwd" placeholder="API password (if set)"
+           style="width:160px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:5px 10px;border-radius:4px;font-family:var(--mono);font-size:11px;"
+           oninput="apiPassword=this.value;localStorage.setItem('swingscan_api_pwd',this.value)" />
     <button class="connect-btn" onclick="checkConnection()">Connect</button>
     <div class="conn-indicator" id="connIndicator" title="Connection status"></div>
     <span id="connLabel" style="font-size:10px;color:var(--text-dim);">not connected</span>
@@ -618,6 +622,7 @@ let sortDir      = -1;
 let logEvents    = [];
 let evtSource    = null;
 let connected    = false;
+let apiPassword  = localStorage.getItem('swingscan_api_pwd') || '';
 
 // ── CLOCK ─────────────────────────────────────────────────────────────────
 function updateClock() {
@@ -640,6 +645,19 @@ updateClock();
 // ── HELPERS ───────────────────────────────────────────────────────────────
 function apiBase() {
   return document.getElementById('apiUrl').value.replace(/\/+$/, '');
+}
+
+function authHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  if (apiPassword) h['X-API-Key'] = apiPassword;
+  return h;
+}
+
+function authUrl(url) {
+  // Append api_key as query param for EventSource (which cannot set headers)
+  if (!apiPassword) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'api_key=' + encodeURIComponent(apiPassword);
 }
 
 function logAdd(msg, type='info') {
@@ -668,7 +686,7 @@ function setConnected(ok) {
 async function checkConnection() {
   logAdd('Connecting to ' + apiBase() + ' …', 'info');
   try {
-    const resp = await fetch(apiBase() + '/status', {signal: AbortSignal.timeout(5000)});
+    const resp = await fetch(apiBase() + '/status', {signal: AbortSignal.timeout(5000), headers: authHeaders()});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     setConnected(true);
@@ -873,7 +891,7 @@ function startScan(fromAuto) {
   const url = apiBase() + '/scan/stream' + (symOverride ? '?symbols=' + encodeURIComponent(symOverride) : '');
 
   logAdd('Scan started via SSE stream…', 'info');
-  evtSource = new EventSource(url);
+  evtSource = new EventSource(authUrl(url));
 
   evtSource.onmessage = (e) => {
     const msg = JSON.parse(e.data);
@@ -936,7 +954,7 @@ function finishScan() {
 async function stopScan() {
   logAdd('Sending stop signal…', 'warn');
   try {
-    await fetch(apiBase() + '/scan/stop', {method:'POST'});
+    await fetch(apiBase() + '/scan/stop', {method:'POST', headers: authHeaders()});
   } catch(e) {
     logAdd('Stop request failed: ' + e.message, 'err');
   }
@@ -1004,7 +1022,7 @@ let trackerPollTimer = null;
 async function fetchTracker() {
   if (!connected) return;
   try {
-    const resp = await fetch(apiBase() + '/tracker/trades', {signal: AbortSignal.timeout(5000)});
+    const resp = await fetch(apiBase() + '/tracker/trades', {signal: AbortSignal.timeout(5000), headers: authHeaders()});
     if (!resp.ok) return;
     trackerData = await resp.json();
     updateTrackerMetrics();
@@ -1039,7 +1057,7 @@ function addTradeToTracker(signal) {
 
 async function resetTracker() {
   if (!confirm('Reset all trades for this week?')) return;
-  await fetch(apiBase() + '/tracker/reset', {method:'POST'});
+  await fetch(apiBase() + '/tracker/reset', {method:'POST', headers: authHeaders()});
   logAdd('Trade tracker reset manually', 'warn');
   fetchTracker();
 }
@@ -1103,7 +1121,7 @@ function renderTracker() {
 async function checkKiteStatus() {
   if (!connected) return;
   try {
-    const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(5000)});
+    const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(5000), headers: authHeaders()});
     const data = await resp.json();
     const el   = document.getElementById('kiteStatus');
     if (data.logged_in && data.valid) {
@@ -1138,7 +1156,7 @@ function openKiteLogin() {
     attempts++;
     if (attempts > 24) { clearInterval(poll); return; }
     try {
-      const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(3000)});
+      const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(3000), headers: authHeaders()});
       const data = await resp.json();
       if (data.logged_in && data.valid) {
         clearInterval(poll);
