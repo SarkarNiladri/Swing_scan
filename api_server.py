@@ -125,7 +125,7 @@ ADX_THRESHOLD = 25
 ATR_PERIOD    = 14
 SR_ZONE_PCT   = 0.015
 RISK_REWARD   = 2.0
-MIN_SCORE     = 7
+MIN_SCORE     = 9
 ATR_MULT      = 2.0
 
 # ── Background scheduler config ───────────────────────────────────────────
@@ -148,8 +148,16 @@ scan_state = {
     "scanned":      0,
     "total":        0,
     "last_scan":    None,
-    "notified_today": {},   # key -> date, tracks sent notifications
-    "notified_date":  None, # date when tracker was last reset
+    "notified_today": {},
+    "notified_date":  None,
+}
+
+# ── Trade tracker — persists in memory, polled by UI ──────────────────────
+# Each trade: {id, symbol, signal, entry, target, stop_loss, score, time,
+#              outcome: OPEN|WIN|LOSS, resolved_at, pnl_pct}
+trade_tracker = {
+    "trades":      [],          # list of trade dicts
+    "week_start":  None,        # ISO date of current week start (Monday)
 }
 
 
@@ -622,6 +630,141 @@ def market_is_open() -> bool:
 
 
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# TRADE TRACKER HELPERS
+# ════════════════════════════════════════════════════════════════════════════
+
+def get_week_start() -> str:
+    """Returns the ISO date string of this week's Monday in IST."""
+    today = datetime.now(IST).date()
+    monday = today - pd.Timedelta(days=today.weekday())
+    return monday.isoformat()
+
+
+def reset_tracker_if_new_week():
+    """Clears all trades at the start of each new week (Monday IST)."""
+    week_start = get_week_start()
+    if trade_tracker["week_start"] != week_start:
+        trade_tracker["trades"]     = []
+        trade_tracker["week_start"] = week_start
+        print(f"[tracker] Weekly reset — new week started {week_start}")
+
+
+def add_trade(signal: dict):
+    """Add a new OPEN trade to the tracker. Ignores duplicates."""
+    reset_tracker_if_new_week()
+    trade_id = (
+        f"{signal['symbol']}_{signal['signal']}_"
+        f"{signal['entry']}_{signal['target']}_{signal['stop_loss']}"
+    )
+    # Skip if already tracked
+    if any(t["id"] == trade_id for t in trade_tracker["trades"]):
+        return
+    trade_tracker["trades"].append({
+        "id":        trade_id,
+        "symbol":    signal["symbol"],
+        "signal":    signal["signal"],
+        "entry":     signal["entry"],
+        "target":    signal["target"],
+        "stop_loss": signal["stop_loss"],
+        "score":     signal["score"],
+        "time":      signal.get("time", ""),
+        "outcome":   "OPEN",
+        "resolved_at": None,
+        "pnl_pct":   None,
+    })
+    print(f"[tracker] Added {signal['signal']} trade: {signal['symbol']}")
+
+
+def check_open_trades():
+    """
+    For every OPEN trade, fetch latest candles and check if
+    target or SL has been hit. Updates outcome in-place.
+    Sends Telegram notification when resolved.
+    """
+    reset_tracker_if_new_week()
+    open_trades = [t for t in trade_tracker["trades"] if t["outcome"] == "OPEN"]
+    if not open_trades:
+        return
+
+    print(f"[tracker] Checking {len(open_trades)} open trade(s)...")
+
+    for trade in open_trades:
+        try:
+            ticker = trade["symbol"] + ".NS"
+            # Fetch last 2 days of 15-min candles
+            df = yf.download(ticker, period="2d", interval="15m",
+                             progress=False, auto_adjust=True)
+            if df is None or len(df) == 0:
+                continue
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            df.dropna(inplace=True)
+
+            entry     = float(trade["entry"])
+            target    = float(trade["target"])
+            stop_loss = float(trade["stop_loss"])
+            signal    = trade["signal"]
+
+            # Only look at candles after the trade was added
+            # (use last 26 candles ≈ 1 trading day as window)
+            recent = df.tail(26)
+
+            outcome = None
+            for _, row in recent.iterrows():
+                high  = float(row["High"])
+                low   = float(row["Low"])
+                close = float(row["Close"])
+
+                if signal == "BUY":
+                    if low <= stop_loss:
+                        outcome = "LOSS"
+                        pnl_pct = round((stop_loss - entry) / entry * 100, 2)
+                        break
+                    if high >= target:
+                        outcome = "WIN"
+                        pnl_pct = round((target - entry) / entry * 100, 2)
+                        break
+                else:  # SELL
+                    if high >= stop_loss:
+                        outcome = "LOSS"
+                        pnl_pct = round((entry - stop_loss) / entry * 100, 2)
+                        break
+                    if low <= target:
+                        outcome = "WIN"
+                        pnl_pct = round((entry - target) / entry * 100, 2)
+                        break
+
+            if outcome:
+                trade["outcome"]     = outcome
+                trade["pnl_pct"]     = pnl_pct
+                trade["resolved_at"] = datetime.now(IST).strftime("%H:%M:%S IST")
+                print(f"[tracker] {trade['symbol']} → {outcome} ({pnl_pct:+.2f}%)")
+
+                # Telegram notification for outcome
+                icon = "✅" if outcome == "WIN" else "❌"
+                lines = [
+                    f"{icon} *{outcome} — {trade['symbol']} {signal}*",
+                    "",
+                    f"Entry  : Rs {entry:,.2f}",
+                    f"Target : Rs {target:,.2f}",
+                    f"SL     : Rs {stop_loss:,.2f}",
+                    f"P&L    : {pnl_pct:+.2f}%",
+                    f"Time   : {trade['resolved_at']}",
+                ]
+                msg = "\n".join(lines)
+                try:
+                    httpx.post(
+                        TELEGRAM_API_URL,
+                        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"[tracker] Telegram error: {e}")
+
+        except Exception as e:
+            print(f"[tracker] Error checking {trade['symbol']}: {e}")
+
 # ════════════════════════════════════════════════════════════════════════════
 # BACKGROUND SCHEDULER — runs scan every 15 min during market hours
 # Independent of browser/UI — fires Telegram alerts automatically
@@ -672,6 +815,7 @@ def run_background_scan():
                 if fingerprint not in scan_state["notified_today"]:
                     scan_state["notified_today"][fingerprint] = today
                     send_telegram(result)
+                    add_trade(result)   # register in trade tracker
                     print(f"[scheduler] {result['signal']} signal: {result['symbol']} score={result['score']}")
 
         scan_state["last_scan"] = datetime.now(IST).isoformat()
@@ -686,26 +830,32 @@ def run_background_scan():
 def scheduler_loop():
     """
     Infinite loop that runs in a daemon thread.
-    Checks every minute if it's time to scan.
-    Scans every AUTO_SCAN_INTERVAL seconds during market hours.
+    Every minute:
+      - Checks if it is time to run a full scan (every 15 min, market open)
+      - Checks all open trades for target/SL hits (every minute, market open)
+      - Resets tracker on Monday
     """
     last_scan_time = 0
 
     while True:
         try:
+            import time as _time
             now_ts = datetime.now(IST).timestamp()
-            if market_is_open() and (now_ts - last_scan_time) >= AUTO_SCAN_INTERVAL:
-                last_scan_time = now_ts
-                run_background_scan()
-            else:
-                time_to_next = AUTO_SCAN_INTERVAL - (now_ts - last_scan_time)
-                if not market_is_open():
-                    pass  # market closed, just wait
+            reset_tracker_if_new_week()
+
+            if market_is_open():
+                # Full scan every 15 min
+                if (now_ts - last_scan_time) >= AUTO_SCAN_INTERVAL:
+                    last_scan_time = now_ts
+                    run_background_scan()
+                # Check open trades every minute during market hours
+                threading.Thread(target=check_open_trades, daemon=True).start()
+
         except Exception as e:
             print(f"[scheduler] Loop error: {e}")
 
         import time as _time
-        _time.sleep(60)   # check every minute
+        _time.sleep(60)
 
 
 # Start background scheduler thread on server startup
@@ -806,6 +956,7 @@ async def scan_stream(symbols: str = ""):
                     if fingerprint not in scan_state["notified_today"]:
                         scan_state["notified_today"][fingerprint] = today
                         threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
+                        add_trade(result)   # register in trade tracker
 
             scan_state["last_scan"] = datetime.now(IST).isoformat()
             yield f"data: {json.dumps({'type':'done','total_signals':signal_count,'scanned':len(symbol_list)})}\n\n"
@@ -849,6 +1000,28 @@ async def scan_stop():
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return {"ping": "pong", "time": datetime.now(IST).isoformat()}
+
+
+@app.get("/tracker/trades")
+async def tracker_trades():
+    """Returns all trades for the current week with their outcomes."""
+    reset_tracker_if_new_week()
+    return JSONResponse({
+        "trades":     trade_tracker["trades"],
+        "week_start": trade_tracker["week_start"],
+        "total":      len(trade_tracker["trades"]),
+        "wins":       sum(1 for t in trade_tracker["trades"] if t["outcome"] == "WIN"),
+        "losses":     sum(1 for t in trade_tracker["trades"] if t["outcome"] == "LOSS"),
+        "open":       sum(1 for t in trade_tracker["trades"] if t["outcome"] == "OPEN"),
+    })
+
+
+@app.post("/tracker/reset")
+async def tracker_reset():
+    """Manually reset the trade tracker."""
+    trade_tracker["trades"]     = []
+    trade_tracker["week_start"] = get_week_start()
+    return {"reset": True, "week_start": trade_tracker["week_start"]}
 
 
 @app.get("/")

@@ -553,8 +553,12 @@
     <!-- Tracker table -->
     <div class="table-wrap">
       <div class="table-header-bar">
-        <span>Trade Log</span>
-        <span style="font-size:10px;color:var(--text-muted);">Click WIN / LOSS to record outcome. Data saved in browser.</span>
+        <span>Trade Log &nbsp;<span id="weekLabel" style="color:var(--text-muted);font-size:10px;"></span></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:10px;color:var(--text-muted);">&#128260; Auto-updates every 60s</span>
+          <button onclick="fetchTracker()" style="background:var(--blue-dim);border:1px solid var(--blue);color:var(--blue);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;">Refresh</button>
+          <button onclick="resetTracker()" style="background:var(--red-dim);border:1px solid var(--red);color:var(--red);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;">Reset Week</button>
+        </div>
       </div>
       <div class="tbl-scroll">
         <table>
@@ -668,6 +672,9 @@ async function checkConnection() {
     const badge = document.getElementById('niftyBadge');
     badge.textContent = 'NIFTY ' + data.nifty_trend.toUpperCase();
     badge.className   = 'nifty-trend ' + data.nifty_trend;
+
+    // Start polling tracker for outcome updates
+    startTrackerPolling();
   } catch (e) {
     setConnected(false);
     logAdd('Connection failed: ' + e.message + ' — is api_server.py running?', 'err');
@@ -979,89 +986,97 @@ function closeChart(e) {
 }
 
 // ── PERFORMANCE TRACKER ───────────────────────────────────────────────────
-const TRACKER_KEY = 'swingscan_tracker';
+// All trade data lives on the server (/tracker/trades).
+// UI polls every 60 seconds and re-renders automatically.
+// Outcomes (WIN/LOSS) are set by the server when target/SL is hit.
 
-function loadTrades() {
+let trackerData = { trades: [], wins: 0, losses: 0, open: 0, total: 0, week_start: null };
+let trackerPollTimer = null;
+
+async function fetchTracker() {
+  if (!connected) return;
   try {
-    return JSON.parse(localStorage.getItem(TRACKER_KEY) || '[]');
-  } catch { return []; }
+    const resp = await fetch(apiBase() + '/tracker/trades', {signal: AbortSignal.timeout(5000)});
+    if (!resp.ok) return;
+    trackerData = await resp.json();
+    updateTrackerMetrics();
+    renderTracker();
+  } catch(e) { /* silent fail — server may be scanning */ }
 }
 
-function saveTrades(trades) {
-  localStorage.setItem(TRACKER_KEY, JSON.stringify(trades));
+function startTrackerPolling() {
+  if (trackerPollTimer) clearInterval(trackerPollTimer);
+  fetchTracker();
+  // Poll every 60 seconds for outcome updates
+  trackerPollTimer = setInterval(fetchTracker, 60000);
 }
 
 function addTradeToTracker(signal) {
-  const trades = loadTrades();
-  const id = signal.symbol + '_' + signal.signal + '_' + signal.entry + '_' + (signal.time || Date.now());
-  // Avoid duplicate entries
-  if (trades.find(t => t.id === id)) return;
-  trades.unshift({
-    id,
-    symbol:    signal.symbol,
-    signal:    signal.signal,
-    entry:     signal.entry,
-    target:    signal.target,
-    stop_loss: signal.stop_loss,
-    score:     signal.score,
-    time:      signal.time || '',
-    outcome:   'OPEN',
-    added:     new Date().toISOString(),
-  });
-  saveTrades(trades);
-  renderTracker();
-  updateTrackerMetrics();
+  // Optimistically add to local cache so it shows instantly
+  // Server also adds it — fetchTracker will sync
+  const id = `${signal.symbol}_${signal.signal}_${signal.entry}_${signal.target}_${signal.stop_loss}`;
+  if (!trackerData.trades.find(t => t.id === id)) {
+    trackerData.trades.unshift({
+      id, symbol: signal.symbol, signal: signal.signal,
+      entry: signal.entry, target: signal.target, stop_loss: signal.stop_loss,
+      score: signal.score, time: signal.time || '', outcome: 'OPEN',
+      resolved_at: null, pnl_pct: null,
+    });
+    trackerData.total++;
+    trackerData.open++;
+    updateTrackerMetrics();
+    renderTracker();
+  }
 }
 
-function setOutcome(id, outcome) {
-  const trades = loadTrades();
-  const t = trades.find(t => t.id === id);
-  if (t) { t.outcome = outcome; saveTrades(trades); renderTracker(); updateTrackerMetrics(); }
-}
-
-function deleteTrade(id) {
-  const trades = loadTrades().filter(t => t.id !== id);
-  saveTrades(trades); renderTracker(); updateTrackerMetrics();
+async function resetTracker() {
+  if (!confirm('Reset all trades for this week?')) return;
+  await fetch(apiBase() + '/tracker/reset', {method:'POST'});
+  logAdd('Trade tracker reset manually', 'warn');
+  fetchTracker();
 }
 
 function updateTrackerMetrics() {
-  const trades  = loadTrades();
-  const wins    = trades.filter(t => t.outcome === 'WIN');
-  const losses  = trades.filter(t => t.outcome === 'LOSS');
-  const open    = trades.filter(t => t.outcome === 'OPEN');
-  const closed  = wins.length + losses.length;
-  const winRate = closed > 0 ? Math.round(wins.length / closed * 100) : 0;
-  document.getElementById('ptTotal').textContent   = trades.length;
-  document.getElementById('ptWins').textContent    = wins.length;
-  document.getElementById('ptLosses').textContent  = losses.length;
-  document.getElementById('ptOpen').textContent    = open.length;
+  const { total, wins, losses, open, week_start } = trackerData;
+  const closed  = wins + losses;
+  const winRate = closed > 0 ? Math.round(wins / closed * 100) : 0;
+  document.getElementById('ptTotal').textContent   = total || '—';
+  document.getElementById('ptWins').textContent    = wins  || '—';
+  document.getElementById('ptLosses').textContent  = losses|| '—';
+  document.getElementById('ptOpen').textContent    = open  || '—';
   document.getElementById('ptWinRate').textContent = closed > 0 ? winRate + '%' : '—';
   document.getElementById('ptWinBar').style.width  = winRate + '%';
+  if (week_start) {
+    const d = new Date(week_start);
+    document.getElementById('weekLabel').textContent =
+      'Week of ' + d.toLocaleDateString('en-IN', {day:'numeric', month:'short', year:'numeric'});
+  }
 }
 
 function renderTracker() {
-  const trades = loadTrades();
+  const trades = trackerData.trades || [];
   const body   = document.getElementById('trackerBody');
   if (!trades.length) {
-    body.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div class="icon">&#128200;</div>No trades logged yet. Signals appear here automatically.</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div class="icon">&#128200;</div>No trades this week yet. Signals will appear here automatically when found.</div></td></tr>`;
     return;
   }
   body.innerHTML = trades.map(t => {
     const entFmt = parseFloat(t.entry).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     const tgtFmt = parseFloat(t.target).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     const slFmt  = parseFloat(t.stop_loss).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-    const sigCol = t.signal === 'BUY' ? 'var(--green)' : 'var(--red)';
+
     let outcomeHtml = '';
     if (t.outcome === 'OPEN') {
-      outcomeHtml = `
-        <button class="outcome-btn win"  onclick="setOutcome('${t.id}','WIN')">&#10003; WIN</button>
-        <button class="outcome-btn loss" onclick="setOutcome('${t.id}','LOSS')">&#10007; LOSS</button>`;
+      outcomeHtml = `<span class="outcome-btn open">&#9711; MONITORING</span>`;
     } else if (t.outcome === 'WIN') {
-      outcomeHtml = `<span style="color:var(--green);font-weight:600;">&#10003; TARGET HIT</span>`;
+      const pnl = t.pnl_pct != null ? ` (+${t.pnl_pct}%)` : '';
+      outcomeHtml = `<span style="color:var(--green);font-weight:600;">&#10003; TARGET HIT${pnl}</span>`;
     } else {
-      outcomeHtml = `<span style="color:var(--red);font-weight:600;">&#10007; SL HIT</span>`;
+      const pnl = t.pnl_pct != null ? ` (${t.pnl_pct}%)` : '';
+      outcomeHtml = `<span style="color:var(--red);font-weight:600;">&#10007; SL HIT${pnl}</span>`;
     }
-    const idSafe = t.id.replace(/[^a-zA-Z0-9_]/g, '_');
+    const resolvedAt = t.resolved_at ? `<div style="font-size:9px;color:var(--text-muted)">${t.resolved_at}</div>` : '';
+
     return `<tr>
       <td><a class="ticker-link" onclick="openChart('${t.symbol}','${t.signal}')">${t.symbol} &#8599;</a></td>
       <td><span class="signal-pill ${t.signal}">${t.signal}</span></td>
@@ -1070,16 +1085,14 @@ function renderTracker() {
       <td class="sl-p">₹${slFmt}</td>
       <td style="color:var(--amber)">${t.score}/13</td>
       <td class="time-cell">${t.time}</td>
-      <td style="display:flex;gap:6px;align-items:center;padding:6px 10px;">${outcomeHtml}</td>
-      <td><button class="del-btn" onclick="deleteTrade('${t.id}')" title="Remove">&#10005;</button></td>
+      <td>${outcomeHtml}${resolvedAt}</td>
+      <td></td>
     </tr>`;
   }).join('');
-  updateTrackerMetrics();
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────
 logAdd('SwingScan UI loaded — enter your API URL and click Connect', 'info');
-updateTrackerMetrics();
 </script>
 </body>
 </html>
