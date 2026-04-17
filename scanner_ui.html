@@ -1108,52 +1108,45 @@ async function checkKiteStatus() {
     const el   = document.getElementById('kiteStatus');
     if (data.logged_in && data.valid) {
       el.textContent = 'Kite ✓ ' + (data.user || '');
-      el.style.background   = 'var(--green-dim)';
-      el.style.borderColor  = 'var(--green)';
-      el.style.color        = 'var(--green)';
-      logAdd('Kite connected — accurate candle data active', 'info');
+      el.style.background  = 'var(--green-dim)';
+      el.style.borderColor = 'var(--green)';
+      el.style.color       = 'var(--green)';
+      el.title = 'Kite active — click to refresh status';
+      logAdd('Kite connected — accurate candle data + closing-price SL active', 'info');
     } else {
-      el.textContent = 'Kite LOGIN';
-      el.style.background   = 'var(--amber-dim)';
-      el.style.borderColor  = 'var(--amber)';
-      el.style.color        = 'var(--amber)';
-      if (data.login_url) {
-        const go = confirm(
-          'Kite not logged in. Open Zerodha login page now?\n\n' +
-          'After login, copy the request_token from the redirect URL and paste it here.'
-        );
-        if (go) {
-          window.open(data.login_url, '_blank');
-          setTimeout(() => {
-            const token = prompt(
-              'Paste the request_token from the Zerodha redirect URL:\n' +
-              '(it appears as ?request_token=XXXXX in the URL after login)'
-            );
-            if (token && token.trim()) {
-              submitKiteToken(token.trim());
-            }
-          }, 3000);
-        }
-      }
+      el.textContent = 'Kite LOGIN ↗';
+      el.style.background  = 'var(--amber-dim)';
+      el.style.borderColor = 'var(--amber)';
+      el.style.color       = 'var(--amber)';
+      el.title = 'Click to login with Zerodha';
+      el.onclick = openKiteLogin;
+      logAdd('Kite not logged in — click "Kite LOGIN" in header to authenticate', 'warn');
     }
   } catch(e) {
     logAdd('Kite status check failed: ' + e.message, 'warn');
   }
 }
 
-async function submitKiteToken(token) {
-  try {
-    const resp = await fetch(apiBase() + '/kite/callback?token=' + encodeURIComponent(token));
-    const data = await resp.json();
-    if (data.status === 'success') {
-      logAdd('Kite login successful — ' + data.message, 'info');
-      checkKiteStatus();
-    } else {
-      logAdd('Kite login failed: ' + (data.error || 'Unknown error'), 'err');
-    }
-  } catch(e) {
-    logAdd('Kite token submit failed: ' + e.message, 'err');
-  }
+function openKiteLogin() {
+  // Open the login page in a new tab — Zerodha will redirect back to /kite/callback automatically
+  const loginUrl = apiBase() + '/kite/login';
+  window.open(loginUrl, '_blank', 'width=520,height=600');
+  logAdd('Zerodha login page opened — login and the tab will close automatically', 'info');
+  // Poll for successful login every 5 seconds for up to 2 minutes
+  let attempts = 0;
+  const poll = setInterval(async () => {
+    attempts++;
+    if (attempts > 24) { clearInterval(poll); return; }
+    try {
+      const resp = await fetch(apiBase() + '/kite/status', {signal: AbortSignal.timeout(3000)});
+      const data = await resp.json();
+      if (data.logged_in && data.valid) {
+        clearInterval(poll);
+        checkKiteStatus();
+        logAdd('Kite login confirmed — ' + data.user, 'info');
+      }
+    } catch(e) {}
+  }, 5000);
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────

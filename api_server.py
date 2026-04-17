@@ -46,7 +46,7 @@ except ImportError:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
@@ -1155,52 +1155,113 @@ async def ping():
 
 @app.get("/kite/login")
 async def kite_login():
-    """
-    Returns the Zerodha login URL.
-    Open this URL in browser → login → you land on redirect with request_token.
-    Pass that token to /kite/callback?token=XXX
-    """
+    """Serves a login page that redirects to Zerodha."""
     if not KITE_AVAILABLE:
-        return JSONResponse({"error": "kiteconnect not installed"}, status_code=500)
+        return HTMLResponse("<h2>kiteconnect not installed on server</h2>", status_code=500)
     url = kite_get_login_url()
-    return JSONResponse({"login_url": url, "instructions":
-        "Open login_url in browser. After login, copy the request_token from the URL and call /kite/callback?token=YOUR_TOKEN"})
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SwingScan — Zerodha Login</title>
+  <style>
+    body{{margin:0;font-family:monospace;background:#0a0d12;color:#e2e8f0;display:flex;
+         align-items:center;justify-content:center;min-height:100vh;}}
+    .box{{background:#111620;border:1px solid #1e2a3d;border-radius:8px;padding:40px;
+          max-width:440px;width:90%;text-align:center;}}
+    h2{{color:#00e5a0;margin:0 0 10px;font-size:22px;}}
+    p{{color:#64748b;font-size:13px;line-height:1.7;margin:0 0 24px;}}
+    a.btn{{display:inline-block;background:#00e5a0;color:#000;font-weight:700;
+           padding:12px 32px;border-radius:6px;text-decoration:none;font-size:14px;
+           transition:opacity 0.2s;}}
+    a.btn:hover{{opacity:0.85;}}
+    .note{{margin-top:20px;font-size:11px;color:#334155;}}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Zerodha Login</h2>
+    <p>Click below to login with your Zerodha credentials.<br/>
+       After login you will be automatically redirected back here.</p>
+    <a class="btn" href="{url}">Login with Zerodha ↗</a>
+    <div class="note">Your credentials are never stored. Only today's session token is kept in memory.</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(html)
 
 
 @app.get("/kite/callback")
-async def kite_callback(token: str = "", request_token: str = ""):
+async def kite_callback(token: str = "", request_token: str = "", action: str = "", status: str = ""):
     """
-    After Zerodha login, the redirect URL contains ?request_token=XXX
-    This endpoint exchanges it for an access token.
-    Works both ways:
-      /kite/callback?token=XXX
-      /kite/callback?request_token=XXX  (direct Zerodha redirect)
+    Zerodha redirects here after login with ?request_token=XXX&action=login&status=success
+    Automatically exchanges token and shows a success/error HTML page.
+    No copy-pasting needed — fully automatic.
     """
+    def html_page(title, message, color, auto_close=False):
+        close_script = """
+        <p style='color:#64748b;font-size:12px;margin-top:16px;'>This tab will close in 3 seconds...</p>
+        <script>setTimeout(()=>window.close(),3000);</script>""" if auto_close else ""
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SwingScan — Kite Auth</title>
+  <style>
+    body{{margin:0;font-family:monospace;background:#0a0d12;color:#e2e8f0;display:flex;
+         align-items:center;justify-content:center;min-height:100vh;}}
+    .box{{background:#111620;border:1px solid #1e2a3d;border-radius:8px;padding:40px;
+          max-width:440px;width:90%;text-align:center;}}
+    h2{{color:{color};margin:0 0 14px;font-size:22px;}}
+    p{{color:#94a3b8;font-size:13px;line-height:1.7;margin:0;}}
+    .back{{display:inline-block;margin-top:20px;background:{color};color:#000;
+           font-weight:700;padding:10px 24px;border-radius:6px;text-decoration:none;font-size:13px;}}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>{title}</h2>
+    <p>{message}</p>
+    {close_script}
+    <a class="back" href="/">Back to Dashboard</a>
+  </div>
+</body>
+</html>""")
+
     if not KITE_AVAILABLE:
-        return JSONResponse({"error": "kiteconnect not installed"}, status_code=500)
+        return html_page("Error", "kiteconnect not installed on server.", "#ff4757")
+
+    # Zerodha sends status=success or status=error
+    if status == "error" or action == "error":
+        return html_page("Login Cancelled", "Zerodha login was cancelled or failed.<br/>Please try again from the dashboard.", "#ff4757")
 
     req_token = token or request_token
     if not req_token:
-        return JSONResponse({"error": "No token provided. Use ?token=YOUR_REQUEST_TOKEN"}, status_code=400)
+        return html_page("Missing Token",
+            "No request_token found in URL.<br/>Please login again from the dashboard.", "#f4b942")
 
     try:
         kite = KiteConnect(api_key=KITE_API_KEY)
-        session = kite.generate_session(req_token, api_secret=KITE_API_SECRET)
+        session      = kite.generate_session(req_token, api_secret=KITE_API_SECRET)
         access_token = session["access_token"]
-        success = kite_set_token(access_token)
+        success      = kite_set_token(access_token)
         if success:
             profile = kite_state["kite"].profile()
             name    = profile.get("user_name", "?")
-            return JSONResponse({
-                "status":  "success",
-                "message": f"Logged in as {name}. Kite active for today.",
-                "user":    name,
-                "date":    kite_state["token_date"],
-            })
+            return html_page(
+                "Login Successful ✓",
+                f"Welcome <strong style='color:#00e5a0'>{name}</strong>!<br/>"
+                f"Kite is now active for today.<br/>"
+                f"Accurate candle data and closing-price SL confirmation are now enabled.",
+                "#00e5a0",
+                auto_close=True,
+            )
         else:
-            return JSONResponse({"error": "Token set failed"}, status_code=500)
+            return html_page("Login Failed", "Token exchange failed. Please try again.", "#ff4757")
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return html_page("Error", f"Authentication error:<br/>{str(e)}", "#ff4757")
 
 
 @app.get("/kite/status")
