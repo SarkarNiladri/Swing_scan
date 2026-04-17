@@ -248,7 +248,7 @@ ADX_THRESHOLD = 25
 ATR_PERIOD    = 14
 SR_ZONE_PCT   = 0.015
 RISK_REWARD   = 2.0
-MIN_SCORE     = 7
+MIN_SCORE     = 10
 ATR_MULT      = 2.0
 
 # ── Background scheduler config ───────────────────────────────────────────
