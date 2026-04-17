@@ -66,13 +66,13 @@ except ImportError:
 
 
 # ── Telegram Notification Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '8773932134:AAGI6zGCtw8gpj-oH5qzRvmjw0q6_ZXPJwk')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6086165397')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # ── Zerodha Kite Connect Config ────────────────────────────────────────────
-KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
-KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    'ax238c39wtrbiwow')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', 'dliej4ndyeepu040x1aug46udjq4prkd')
 
 # Kite session state — access token valid for one trading day
 kite_state = {
@@ -1607,6 +1607,22 @@ async def kite_status(auth: bool = Depends(verify_auth)):
         "login_url":  login_url,
         "message":    "Open login_url to authenticate. Then call /kite/callback?token=REQUEST_TOKEN",
     })
+
+
+@app.get("/kite/token")
+async def kite_token(auth: bool = Depends(verify_auth)):
+    """
+    Returns today's Kite access token for running backtest.py locally.
+    Protected by API password.
+    """
+    today = datetime.now(IST).date().isoformat()
+    if kite_state["access_token"] and kite_state["token_date"] == today:
+        return JSONResponse({
+            "access_token": kite_state["access_token"],
+            "token_date":   kite_state["token_date"],
+            "note":         "Valid for today only. Use: python backtest.py --kite-token TOKEN",
+        })
+    return JSONResponse({"error": "No valid token — login via /kite/login first"}, status_code=401)
 
 
 @app.get("/quotes")
