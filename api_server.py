@@ -897,12 +897,19 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
                 sell_score -= 1
 
         # CORE 4: MACD confirmation (+2 crossover, +1 momentum)
+        # Reason only added for the direction that scored — no contradictions
         if macd_hist > 0 and prev_macd <= 0:
-            buy_score += 2; reasons.append("MACD ↑ cross")
+            buy_score += 2
+            if ema_bullish: reasons.append("MACD ↑ cross")
         elif macd_hist < 0 and prev_macd >= 0:
-            sell_score += 2; reasons.append("MACD ↓ cross")
-        elif macd_hist > 0:  buy_score  += 1
-        elif macd_hist < 0:  sell_score += 1
+            sell_score += 2
+            if ema_bearish: reasons.append("MACD ↓ cross")
+        elif macd_hist > 0:
+            buy_score += 1
+            if ema_bullish: reasons.append("MACD bullish")
+        elif macd_hist < 0:
+            sell_score += 1
+            if ema_bearish: reasons.append("MACD bearish")
 
         # CORE 5: Volume quality (+2)
         if vol_ratio >= 2.0:
@@ -1024,7 +1031,7 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             "daily_atr":   round(effective_atr, 2),
             "daily_rsi":   daily_rsi,
             "sentiment":   sentiment_label,
-            "candle":      c_name or "—",
+            "candle":      (c_name if (signal=="BUY" and bull_c) or (signal=="SELL" and bear_c) else "—"),
             "reasons":     " | ".join(reasons),
             "time":        datetime.now(IST).strftime("%H:%M:%S IST"),
             "data_source": data_source,
