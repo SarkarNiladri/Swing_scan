@@ -66,13 +66,13 @@ except ImportError:
 
 
 # ── Telegram Notification Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '8773932134:AAGI6zGCtw8gpj-oH5qzRvmjw0q6_ZXPJwk')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6086165397')
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # ── Zerodha Kite Connect Config ────────────────────────────────────────────
-KITE_API_KEY    = os.environ.get('KITE_API_KEY',    'ax238c39wtrbiwow')
-KITE_API_SECRET = os.environ.get('KITE_API_SECRET', 'dliej4ndyeepu040x1aug46udjq4prkd')
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
 
 # Kite session state — access token valid for one trading day
 kite_state = {
