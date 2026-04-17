@@ -385,6 +385,33 @@
     }
     .filter-summary span { color:var(--blue); font-weight:600; }
 
+    /* ── LIVE PRICE ── */
+    .live-price-wrap { display:flex; flex-direction:column; gap:3px; min-width:90px; }
+    .live-price-top  { display:flex; align-items:baseline; gap:5px; }
+    .live-price-val  { font-weight:600; font-size:12px; color:var(--text); }
+    .live-price-chg  { font-size:10px; }
+    .live-price-chg.up   { color:var(--green); }
+    .live-price-chg.down { color:var(--red); }
+    .progress-wrap { position:relative; height:5px; background:var(--border); border-radius:3px; overflow:hidden; }
+    .progress-sl   { position:absolute; left:0; top:0; height:100%; background:var(--red);    border-radius:3px; transition:width 0.4s; }
+    .progress-tgt  { position:absolute; right:0; top:0; height:100%; background:var(--green); border-radius:3px; transition:width 0.4s; }
+    .progress-cur  { position:absolute; top:-2px; width:3px; height:9px; background:var(--text); border-radius:1px; transform:translateX(-50%); transition:left 0.4s; }
+    .live-price-pct { font-size:9px; color:var(--text-dim); display:flex; justify-content:space-between; }
+    .price-loading  { color:var(--text-muted); font-size:10px; }
+
+    /* ── LIVE PRICE ── */
+    .live-price-cell { min-width:80px; }
+    .lp-up   { color:var(--green) !important; font-weight:600; }
+    .lp-down { color:var(--red)   !important; font-weight:600; }
+    .lp-flat { color:var(--text-dim); }
+    .progress-mini {
+      height:3px; background:var(--border); border-radius:2px;
+      overflow:hidden; margin-top:3px; width:100%;
+    }
+    .progress-mini-fill {
+      height:100%; border-radius:2px; transition:width 0.5s;
+    }
+
     /* ── RESPONSIVE ── */
     @media (max-width: 900px) {
       .metrics-row { grid-template-columns: repeat(3,1fr); }
@@ -550,8 +577,10 @@
             <th style="width:80px"  onclick="sortBy('symbol')">Symbol <span class="sort-arrow">↕</span></th>
             <th style="width:55px"  onclick="sortBy('signal')">Signal</th>
             <th style="width:70px"  onclick="sortBy('entry')">Entry ₹</th>
+            <th style="width:80px"  onclick="sortBy('current_price')">Live ₹</th>
             <th style="width:70px"  onclick="sortBy('target')">Target ₹</th>
             <th style="width:70px"  onclick="sortBy('stop_loss')">SL ₹</th>
+            <th style="width:110px">Live Price</th>
             <th style="width:42px"  onclick="sortBy('rsi')">RSI</th>
             <th style="width:42px"  onclick="sortBy('adx')">ADX</th>
             <th style="width:85px"  onclick="sortBy('score')">Score</th>
@@ -563,7 +592,7 @@
           </tr>
         </thead>
         <tbody id="signalBody">
-          <tr><td colspan="13">
+          <tr><td colspan="14">
             <div class="empty-state">
               <div class="icon">&#9782;</div>
               Connect to your API server, then click SCAN
@@ -764,6 +793,10 @@ async function checkConnection() {
     startTrackerPolling();
     // Check Kite login status
     checkKiteStatus();
+    // Start live price polling
+    startLivePricePolling();
+    // Start live price refresh if signals already loaded
+    if (allSignals.length) startLivePrices();
   } catch (e) {
     setConnected(false);
     logAdd('Connection failed: ' + e.message + ' — is api_server.py running?', 'err');
@@ -858,7 +891,7 @@ function renderTable() {
   document.getElementById('tableCount').textContent = filtered.length + ' signal' + (filtered.length===1?'':'s');
   const body = document.getElementById('signalBody');
   if (!filtered.length) {
-    body.innerHTML = `<tr><td colspan="13"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="14"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
     return;
   }
   body.innerHTML = filtered.map(r => {
@@ -871,8 +904,12 @@ function renderTable() {
       <td><a class="ticker-link" onclick="openChart('${r.symbol}','${r.signal}')" title="Open TradingView chart">${r.symbol} &#8599;</a></td>
       <td><span class="signal-pill ${r.signal}">${r.signal}</span></td>
       <td><span class="price">₹${entryFmt}</span></td>
+      <td id="lp_${r.symbol}" class="live-price-cell">
+        <span class="price" style="color:var(--text-dim)">—</span>
+      </td>
       <td><span class="target-p">₹${tgtFmt}</span></td>
       <td><span class="sl-p">₹${slFmt}</span></td>
+      <td id="lp_${r.symbol}"><span class="price-loading">—</span></td>
       <td style="color:${rsiColor}">${r.rsi}</td>
       <td style="color:${adxColor}">${r.adx}</td>
       <td>${scoreBar(r.score)}</td>
@@ -1010,9 +1047,10 @@ function startScan(fromAuto) {
 
     if (msg.type === 'start') {
       document.getElementById('scanLabel').textContent = 'Scanning ' + msg.total + ' stocks…';
-      document.getElementById('niftyBadge').textContent = 'NIFTY ' + msg.nifty_trend.toUpperCase();
+      const adxTxt = msg.nifty_adx ? ` ADX:${msg.nifty_adx}` : '';
+      document.getElementById('niftyBadge').textContent = 'NIFTY ' + msg.nifty_trend.toUpperCase() + adxTxt;
       document.getElementById('niftyBadge').className   = 'nifty-trend ' + msg.nifty_trend;
-      logAdd('Nifty 50 trend: ' + msg.nifty_trend.toUpperCase(), 'info');
+      logAdd(`Nifty trend: ${msg.nifty_trend.toUpperCase()} | ADX: ${msg.nifty_adx || '—'}`, 'info');
     }
 
     else if (msg.type === 'progress') {
@@ -1034,6 +1072,7 @@ function startScan(fromAuto) {
     else if (msg.type === 'done') {
       logAdd(`Scan complete — ${msg.total_signals} signal(s) across ${msg.scanned} stocks`, 'info');
       finishScan();
+      startLivePrices();   // start live price refresh after scan
     }
 
     else if (msg.type === 'stopped') {
@@ -1227,6 +1266,72 @@ function renderTracker() {
       <td></td>
     </tr>`;
   }).join('');
+}
+
+// ── LIVE PRICE POLLING ───────────────────────────────────────────────────
+let livePriceTimer = null;
+
+async function fetchLivePrices() {
+  if (!connected || !allSignals.length) return;
+  const symbols = [...new Set(allSignals.map(s => s.symbol))].join(',');
+  try {
+    const resp = await fetch(
+      apiBase() + '/quotes?symbols=' + encodeURIComponent(symbols),
+      {headers: authHeaders(), signal: AbortSignal.timeout(8000)}
+    );
+    if (!resp.ok) return;
+    const data = await resp.json();
+    updateLivePriceCells(data.quotes || {});
+  } catch(e) { /* silent */ }
+}
+
+function updateLivePriceCells(quotes) {
+  for (const sig of allSignals) {
+    const q   = quotes[sig.symbol];
+    const cell = document.getElementById('lp_' + sig.symbol);
+    if (!cell || !q) continue;
+
+    const price  = q.price;
+    const entry  = parseFloat(sig.entry);
+    const target = parseFloat(sig.target);
+    const sl     = parseFloat(sig.stop_loss);
+    const isBuy  = sig.signal === 'BUY';
+
+    // Color based on direction vs entry
+    let cls = 'lp-flat';
+    if (price > entry) cls = isBuy  ? 'lp-up' : 'lp-down';
+    if (price < entry) cls = isBuy  ? 'lp-down' : 'lp-up';
+
+    // Progress toward target/SL
+    const totalRange = Math.abs(target - sl);
+    let progress = 0, barColor = 'var(--green)';
+    if (totalRange > 0) {
+      if (isBuy) {
+        progress = Math.min(100, Math.max(0, (price - entry) / (target - entry) * 100));
+        barColor  = price >= entry ? 'var(--green)' : 'var(--red)';
+      } else {
+        progress = Math.min(100, Math.max(0, (entry - price) / (entry - target) * 100));
+        barColor  = price <= entry ? 'var(--green)' : 'var(--red)';
+      }
+    }
+
+    const priceFmt = parseFloat(price).toLocaleString('en-IN',
+      {minimumFractionDigits:2, maximumFractionDigits:2});
+    const chg = q.change !== undefined ? (q.change >= 0 ? '+' : '') + q.change.toFixed(2) : '';
+
+    cell.innerHTML = `
+      <span class="${cls}">₹${priceFmt}</span>
+      ${chg ? '<span style="font-size:9px;color:var(--text-muted);margin-left:3px;">' + chg + '%</span>' : ''}
+      <div class="progress-mini">
+        <div class="progress-mini-fill" style="width:${Math.abs(progress).toFixed(0)}%;background:${barColor}"></div>
+      </div>`;
+  }
+}
+
+function startLivePricePolling() {
+  if (livePriceTimer) clearInterval(livePriceTimer);
+  fetchLivePrices();
+  livePriceTimer = setInterval(fetchLivePrices, 60000);  // every 60s
 }
 
 // ── KITE CONNECT STATUS ───────────────────────────────────────────────────

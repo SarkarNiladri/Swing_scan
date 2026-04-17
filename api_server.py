@@ -186,6 +186,50 @@ def kite_get_candles(symbol: str, days: int = 2) -> pd.DataFrame | None:
         return None
 
 
+def should_notify_telegram(signal: dict) -> tuple:
+    """
+    Check if a signal passes all Telegram filter thresholds.
+    Returns (True, "") if it passes, or (False, reason) if filtered out.
+    Filters are set via Render environment variables:
+      TG_MIN_SCORE, TG_MIN_ADX, TG_MIN_RR, TG_NEWS_FILTER, TG_DATA_SOURCE
+    """
+    score  = signal.get("score", 0)
+    adx    = signal.get("adx",   0)
+    entry  = float(signal.get("entry",     0))
+    target = float(signal.get("target",    0))
+    sl     = float(signal.get("stop_loss", 0))
+    news   = signal.get("sentiment",   "Neutral")
+    source = signal.get("data_source", "")
+
+    # Score filter
+    if score < TG_MIN_SCORE:
+        return False, f"Score {score} < min {TG_MIN_SCORE}"
+
+    # ADX filter
+    if adx < TG_MIN_ADX:
+        return False, f"ADX {adx:.1f} < min {TG_MIN_ADX}"
+
+    # R/R filter
+    if TG_MIN_RR > 0 and entry > 0:
+        risk   = abs(entry - sl)
+        reward = abs(target - entry)
+        rr     = reward / risk if risk > 0 else 0
+        if rr < TG_MIN_RR:
+            return False, f"R/R {rr:.1f} < min {TG_MIN_RR}"
+
+    # News filter
+    if TG_NEWS_FILTER == "Positive" and news != "Positive":
+        return False, f"News {news} not Positive"
+    if TG_NEWS_FILTER == "Neutral" and news == "Negative":
+        return False, f"News {news} is Negative"
+
+    # Data source filter
+    if TG_DATA_SOURCE == "kite" and source != "kite":
+        return False, f"Data source {source} not kite"
+
+    return True, ""
+
+
 def send_telegram(signal: dict):
     """Send a signal notification to Telegram. Runs in a background thread."""
     try:
@@ -237,22 +281,35 @@ MARKET_OPEN    = (9, 15)
 MARKET_CLOSE   = (15, 30)
 
 # ── Strategy config (keep in sync with your scanner) ──────────────────────
-RSI_PERIOD    = 14
-RSI_OVERSOLD  = 40
-BB_PERIOD     = 20
-BB_STD        = 2
-EMA_SHORT     = 20
-EMA_LONG      = 50
-ADX_PERIOD    = 14
-ADX_THRESHOLD = 25
-ATR_PERIOD    = 14
-SR_ZONE_PCT   = 0.015
-RISK_REWARD   = 2.0
-MIN_SCORE     = 10
-ATR_MULT      = 2.0
+RSI_PERIOD      = 14
+RSI_OVERSOLD    = 40
+BB_PERIOD       = 20
+BB_STD          = 2
+EMA_SHORT       = 20
+EMA_LONG        = 50
+ADX_PERIOD      = 14
+ADX_THRESHOLD   = 25
+ATR_PERIOD      = 14
+DAILY_ATR_PERIOD= 14      # ATR on daily candles for SL calculation
+SR_ZONE_PCT     = 0.015
+RISK_REWARD     = 2.0
+MIN_SCORE       = 9       # Raised — EMA+ADX mandatory
+ATR_MULT        = 1.5     # Applied to DAILY ATR now (much wider than 15-min)
+NIFTY_ADX_GATE  = 20      # Skip scan if Nifty ADX < this (choppy market)
+MIN_CANDLE_BODY = 0.55    # Signal candle body must be >= 55% of candle range
+VOL_LOOKBACK    = 3       # Consecutive candles for volume trend check
 
 # ── Background scheduler config ───────────────────────────────────────────
 AUTO_SCAN_INTERVAL = 15 * 60   # seconds between scans
+
+# ── Telegram signal filter config ─────────────────────────────────────────
+# Set these in Render environment variables to control which signals
+# get sent to Telegram. Changes take effect without redeploying.
+TG_MIN_SCORE    = int(os.environ.get("TG_MIN_SCORE",    "9"))
+TG_MIN_ADX      = float(os.environ.get("TG_MIN_ADX",    "25"))
+TG_MIN_RR       = float(os.environ.get("TG_MIN_RR",     "2.0"))
+TG_NEWS_FILTER  = os.environ.get("TG_NEWS_FILTER",  "")    # "" = Any, "Positive", "Neutral"
+TG_DATA_SOURCE  = os.environ.get("TG_DATA_SOURCE",  "")    # "" = Any, "kite"
 
 app = FastAPI(title="SwingScan API", version="1.0")
 
@@ -502,48 +559,208 @@ def get_news_sentiment(symbol: str):
 # NIFTY 50 TREND
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_nifty_trend() -> str:
+def get_nifty_trend() -> tuple:
+    """
+    Get Nifty 50 trend + ADX using Kite data if available, else yfinance.
+    Returns (trend_str, adx_value).
+    ADX gate: if ADX < NIFTY_ADX_GATE the market is choppy — skip scanning.
+    """
     try:
-        df = yf.download("^NSEI", period="3mo", interval="1d",
-                         progress=False, auto_adjust=True)
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        df.dropna(inplace=True)
+        df = fetch_nifty_daily()
+        if df is None or len(df) < 55:
+            return "neutral", 0
         close_s   = df["Close"].astype(float)
         close_arr = close_s.values
-        df["EMA20"] = calc_ema(close_arr, close_s, 20)
-        df["EMA50"] = calc_ema(close_arr, close_s, 50)
+        df["EMA20"]    = calc_ema(close_arr, close_s, 20)
+        df["EMA50"]    = calc_ema(close_arr, close_s, 50)
+        adx_s, _, _    = calc_adx(df)
+        df["ADX"]      = adx_s
         df.dropna(inplace=True)
         last  = df.iloc[-1]
-        e20, e50, c = float(last["EMA20"]), float(last["EMA50"]), float(last["Close"])
-        if c > e20 > e50:   return "bullish"
-        elif c < e20 < e50: return "bearish"
-        else:               return "neutral"
+        e20   = float(last["EMA20"])
+        e50   = float(last["EMA50"])
+        c     = float(last["Close"])
+        adx   = float(last["ADX"])
+        if c > e20 > e50:   trend = "bullish"
+        elif c < e20 < e50: trend = "bearish"
+        else:               trend = "neutral"
+        return trend, round(adx, 1)
     except Exception:
-        return "neutral"
+        return "neutral", 0
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # PER-STOCK DAILY TREND
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_stock_trend(symbol: str) -> str:
+def get_stock_daily_data(symbol: str) -> tuple:
+    """
+    Fetch daily data for a stock and return:
+    (trend_str, daily_atr, daily_rsi, daily_ema20_above_ema50)
+    Used for:
+      - Higher timeframe trend confirmation
+      - Daily ATR for realistic SL calculation
+      - Daily RSI to confirm setup quality
+    """
     try:
-        df = yf.download(symbol + ".NS", period="3mo", interval="1d",
+        df = fetch_candles(symbol, interval="day", days=120)
+        if df is None or len(df) < 55:
+            return "neutral", 0, 50, False
+        close_s   = df["Close"].astype(float)
+        close_arr = close_s.values
+        df["EMA20"]  = calc_ema(close_arr, close_s, 20)
+        df["EMA50"]  = calc_ema(close_arr, close_s, 50)
+        df["RSI"]    = calc_rsi(close_arr, close_s, 14)
+        df["ATR"]    = calc_atr(df, DAILY_ATR_PERIOD)
+        df.dropna(inplace=True)
+        last  = df.iloc[-1]
+        e20   = float(last["EMA20"])
+        e50   = float(last["EMA50"])
+        c     = float(last["Close"])
+        d_atr = float(last["ATR"])
+        d_rsi = float(last["RSI"])
+        ema_bull = e20 > e50
+
+        if c > e20 > e50:   trend = "bullish"
+        elif c < e20 < e50: trend = "bearish"
+        else:               trend = "neutral"
+
+        # Higher timeframe confirmation:
+        # For BUY: price above daily EMA20 AND daily RSI > 45
+        # For SELL: price below daily EMA20 AND daily RSI < 55
+        return trend, round(d_atr, 2), round(d_rsi, 1), ema_bull
+    except Exception:
+        return "neutral", 0, 50, False
+
+
+def get_stock_trend(symbol: str) -> str:
+    """Simple wrapper for backward compatibility."""
+    trend, _, _, _ = get_stock_daily_data(symbol)
+    return trend
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CENTRAL DATA FETCHER — Kite first, yfinance fallback
+# ════════════════════════════════════════════════════════════════════════════
+
+# Cache instrument tokens to avoid repeated API calls
+_instrument_cache: dict = {}
+
+
+def get_instrument_token(symbol: str) -> int | None:
+    """Get NSE instrument token for a symbol, cached in memory."""
+    if symbol in _instrument_cache:
+        return _instrument_cache[symbol]
+    kite = kite_get()
+    if not kite:
+        return None
+    try:
+        instruments = kite.instruments("NSE")
+        for inst in instruments:
+            if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
+                _instrument_cache[symbol] = inst["instrument_token"]
+                return inst["instrument_token"]
+    except Exception as e:
+        print(f"[kite] Instrument lookup error {symbol}: {e}")
+    return None
+
+
+def fetch_candles(symbol: str, interval: str = "15minute",
+                  days: int = 60, source_log: list | None = None) -> pd.DataFrame | None:
+    """
+    Fetch OHLCV candles for a symbol.
+    Priority:
+      1. Kite Connect  — real broker data, matches Zerodha charts exactly
+      2. yfinance      — fallback when Kite not logged in (delayed/adjusted)
+
+    Args:
+        symbol    : NSE symbol e.g. 'RELIANCE'
+        interval  : '15minute' | 'day'
+        days      : how many days of history to fetch
+        source_log: optional list to append data source string
+    """
+    from datetime import timedelta
+
+    kite = kite_get()
+
+    # ── Try Kite first ─────────────────────────────────────────────────────
+    if kite:
+        try:
+            token = get_instrument_token(symbol)
+            if token:
+                to_date   = datetime.now(IST)
+                from_date = to_date - timedelta(days=days)
+                records   = kite.historical_data(token, from_date, to_date, interval)
+                if records:
+                    df = pd.DataFrame(records)
+                    df.rename(columns={
+                        "date": "Date", "open": "Open", "high": "High",
+                        "low":  "Low",  "close": "Close", "volume": "Volume"
+                    }, inplace=True)
+                    df.set_index("Date", inplace=True)
+                    df.dropna(inplace=True)
+                    if len(df) > 10:
+                        if source_log is not None:
+                            source_log.append("kite")
+                        return df
+        except Exception as e:
+            print(f"[kite] fetch_candles error {symbol}: {e}")
+
+    # ── Fall back to yfinance ──────────────────────────────────────────────
+    try:
+        yf_interval = "15m" if interval == "15minute" else "1d"
+        yf_period   = f"{days}d" if days <= 59 else "3mo"
+        df = yf.download(symbol + ".NS", period=yf_period,
+                         interval=yf_interval, progress=False, auto_adjust=True)
+        if df is not None and len(df) > 10:
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            df.dropna(inplace=True)
+            if source_log is not None:
+                source_log.append("yfinance")
+            return df
+    except Exception as e:
+        print(f"[yfinance] fetch_candles error {symbol}: {e}")
+
+    return None
+
+
+def fetch_nifty_daily() -> pd.DataFrame | None:
+    """
+    Fetch Nifty 50 daily candles.
+    Kite uses instrument token 256265 for NIFTY 50 index.
+    Falls back to yfinance ^NSEI.
+    """
+    from datetime import timedelta
+    kite = kite_get()
+
+    if kite:
+        try:
+            to_date   = datetime.now(IST)
+            from_date = to_date - timedelta(days=120)
+            # Nifty 50 index token on NSE
+            records = kite.historical_data(256265, from_date, to_date, "day")
+            if records:
+                df = pd.DataFrame(records)
+                df.rename(columns={
+                    "date": "Date", "open": "Open", "high": "High",
+                    "low":  "Low",  "close": "Close", "volume": "Volume"
+                }, inplace=True)
+                df.set_index("Date", inplace=True)
+                df.dropna(inplace=True)
+                if len(df) > 10:
+                    return df
+        except Exception as e:
+            print(f"[kite] Nifty fetch error: {e}")
+
+    # yfinance fallback
+    try:
+        df = yf.download("^NSEI", period="3mo", interval="1d",
                          progress=False, auto_adjust=True)
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
         df.dropna(inplace=True)
-        close_s   = df["Close"].astype(float)
-        close_arr = close_s.values
-        df["EMA20"] = calc_ema(close_arr, close_s, 20)
-        df["EMA50"] = calc_ema(close_arr, close_s, 50)
-        df.dropna(inplace=True)
-        last  = df.iloc[-1]
-        e20, e50, c = float(last["EMA20"]), float(last["EMA50"]), float(last["Close"])
-        if c > e20 > e50:   return "bullish"
-        elif c < e20 < e50: return "bearish"
-        else:               return "neutral"
+        return df if len(df) > 10 else None
     except Exception:
-        return "neutral"
+        return None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -552,102 +769,134 @@ def get_stock_trend(symbol: str) -> str:
 
 def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
     """
-    Improved signal logic:
-    1. Strategy unified to Trend + Pullback (no mean-reversion conflict)
-    2. Volume uses tiered scoring (+1/+2/+3) instead of hard filter
-    3. Context (market trend, stock trend, sentiment) uses score penalty not hard rejection
-    4. BB used for volatility squeeze detection not direct entry
-    5. RSI 40-60 continuation zone adds to trend score
-    6. Overextension check: avoid trades far from EMA
+    High-quality signal logic v3:
+    1. EMA + ADX both MANDATORY — no signal without both
+    2. Daily ATR for SL — prevents wick-based false SL hits
+    3. Strong candle body filter — signal candle must be decisive
+    4. Consistent volume trend — 3-candle volume check
+    5. Higher timeframe daily confirmation
+    6. Nifty ADX gate applied upstream (in scanner loop)
     """
+    source_log = []
     try:
-        df = yf.download(symbol + ".NS", period="60d", interval="15m",
-                         progress=False, auto_adjust=True)
+        # ── Fetch 15-min candles ──────────────────────────────────────────
+        df = fetch_candles(symbol, interval="15minute", days=60, source_log=source_log)
         if df is None or len(df) < EMA_LONG + 20:
             return None
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        df.dropna(inplace=True)
+        df = df.copy()
 
         close_s   = df["Close"].astype(float)
         close_arr = close_s.values
 
-        df["RSI"]       = calc_rsi(close_arr, close_s, RSI_PERIOD)
-        _, _, macdh     = calc_macd(close_arr, close_s)
-        df["MACDh"]     = macdh
-        df["MACDh_prev"]= macdh.shift(1)
+        df["RSI"]        = calc_rsi(close_arr, close_s, RSI_PERIOD)
+        _, _, macdh      = calc_macd(close_arr, close_s)
+        df["MACDh"]      = macdh
+        df["MACDh_prev"] = macdh.shift(1)
         bbu, bb_mid, bbl = calc_bbands(close_arr, close_s, BB_PERIOD, BB_STD)
-        df["BB_Upper"]  = bbu
-        df["BB_Lower"]  = bbl
-        df["BB_Mid"]    = bb_mid
-        df["BB_Width"]  = (bbu - bbl) / bb_mid   # volatility squeeze measure
-        df["EMA_Short"] = calc_ema(close_arr, close_s, EMA_SHORT)
-        df["EMA_Long"]  = calc_ema(close_arr, close_s, EMA_LONG)
-        adx_s, _, _     = calc_adx(df)
-        df["ADX"]       = adx_s
-        df["ATR"]       = calc_atr(df)
+        df["BB_Upper"]   = bbu
+        df["BB_Lower"]   = bbl
+        df["BB_Mid"]     = bb_mid
+        df["BB_Width"]   = (bbu - bbl) / bb_mid
+        df["EMA_Short"]  = calc_ema(close_arr, close_s, EMA_SHORT)
+        df["EMA_Long"]   = calc_ema(close_arr, close_s, EMA_LONG)
+        adx_s, _, _      = calc_adx(df)
+        df["ADX"]        = adx_s
+        df["ATR"]        = calc_atr(df)
         df.dropna(inplace=True)
 
         if len(df) < 5:
             return None
 
         last = df.iloc[-1]
+        prev = df.iloc[-2]
+
         close     = float(last["Close"])
+        open_     = float(last["Open"])
+        high_     = float(last["High"])
+        low_      = float(last["Low"])
         volume    = float(last["Volume"])
-        rsi       = float(last.get("RSI",       50))
-        macd_hist = float(last.get("MACDh",      0))
-        prev_macd = float(last.get("MACDh_prev", 0))
+        rsi       = float(last.get("RSI",        50))
+        macd_hist = float(last.get("MACDh",       0))
+        prev_macd = float(last.get("MACDh_prev",  0))
         bb_lower  = float(last.get("BB_Lower",  close))
         bb_upper  = float(last.get("BB_Upper",  close))
         bb_width  = float(last.get("BB_Width",  0.02))
         ema_short = float(last.get("EMA_Short", close))
         ema_long  = float(last.get("EMA_Long",  close))
         adx       = float(last.get("ADX",           0))
-        atr       = float(last.get("ATR", close*0.01))
+        atr_15m   = float(last.get("ATR", close*0.005))
 
         avg_vol   = df["Volume"].tail(20*26).mean()
         vol_ratio = volume / avg_vol if avg_vol > 0 else 0
 
+        # ════════════════════════════════════════════════════════════
+        # GATE 1 — EMA + ADX MANDATORY
+        # Both must be present — no signal without these two
+        # ════════════════════════════════════════════════════════════
+        ema_bullish = ema_short > ema_long
+        ema_bearish = ema_short <= ema_long
+        adx_strong  = adx >= ADX_THRESHOLD
+
+        # Hard reject if ADX is weak — choppy stock
+        if not adx_strong:
+            return None
+
+        # ════════════════════════════════════════════════════════════
+        # GATE 2 — STRONG CANDLE BODY FILTER
+        # Signal candle body must be at least MIN_CANDLE_BODY of range
+        # Doji / spinning top candles = indecision = skip
+        # ════════════════════════════════════════════════════════════
+        candle_range = high_ - low_
+        candle_body  = abs(close - open_)
+        if candle_range > 0:
+            body_ratio = candle_body / candle_range
+            if body_ratio < MIN_CANDLE_BODY:
+                return None   # indecision candle — skip
+
+        # ════════════════════════════════════════════════════════════
+        # GATE 3 — CONSISTENT VOLUME TREND (last 3 candles)
+        # Volume must be above average in at least 2 of last 3 candles
+        # Avoids single-candle volume spikes that immediately reverse
+        # ════════════════════════════════════════════════════════════
+        recent_vols = df["Volume"].tail(VOL_LOOKBACK + 1).values
+        avg_vol_short = df["Volume"].tail(26).mean()   # 1-day average
+        vol_above_avg = sum(1 for v in recent_vols[:-1] if v > avg_vol_short)
+        if vol_above_avg < 2:
+            return None   # volume not consistently elevated
+
+        # ════════════════════════════════════════════════════════════
+        # SCORING — EMA+ADX already confirmed above
+        # ════════════════════════════════════════════════════════════
         buy_score = 0; sell_score = 0; reasons = []
 
-        # ════════════════════════════════════════════════════
-        # CORE SIGNALS (max ~9 points) — must all align
-        # ════════════════════════════════════════════════════
-
-        # ── CORE 1: TREND via EMA + ADX (max 3 pts) ──────────────────────
-        # EMA is the primary trend filter — highest weight
-        if ema_short > ema_long:
+        # CORE 1: EMA trend (+3) — already validated
+        if ema_bullish:
             buy_score += 3; reasons.append("EMA bullish")
         else:
             sell_score += 3; reasons.append("EMA bearish")
 
-        # ADX must confirm trend is actually moving
-        if adx > ADX_THRESHOLD:
-            if ema_short > ema_long: buy_score  += 2
-            else:                    sell_score += 2
-            reasons.append(f"ADX({adx:.0f})")
-        else:
-            # Weak trend — penalise
-            buy_score -= 1; sell_score -= 1
+        # CORE 2: ADX strength (+2) — already validated
+        if ema_bullish: buy_score  += 2
+        else:           sell_score += 2
+        reasons.append(f"ADX({adx:.0f})")
 
-        # ── CORE 2: PULLBACK via RSI (max 2 pts) ─────────────────────────
-        # Only reward RSI if it aligns with the trend direction
-        if ema_short > ema_long:
+        # CORE 3: RSI pullback zone (+2)
+        if ema_bullish:
             if 35 <= rsi <= 55:
                 buy_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback")
             elif rsi < 35:
                 buy_score += 1; reasons.append(f"RSI({rsi:.0f}) oversold")
-            elif rsi > 70:
-                buy_score -= 1   # overbought in uptrend — bad entry
+            elif rsi > 72:
+                buy_score -= 1
         else:
             if 45 <= rsi <= 65:
                 sell_score += 2; reasons.append(f"RSI({rsi:.0f}) pullback")
             elif rsi > 65:
                 sell_score += 1; reasons.append(f"RSI({rsi:.0f}) overbought")
-            elif rsi < 30:
-                sell_score -= 1  # oversold in downtrend — bad short entry
+            elif rsi < 28:
+                sell_score -= 1
 
-        # ── CORE 3: MACD CONFIRMATION (max 2 pts) ────────────────────────
-        # Only fresh crossovers get full +2; existing momentum gets +1
+        # CORE 4: MACD confirmation (+2 crossover, +1 momentum)
         if macd_hist > 0 and prev_macd <= 0:
             buy_score += 2; reasons.append("MACD ↑ cross")
         elif macd_hist < 0 and prev_macd >= 0:
@@ -655,50 +904,41 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         elif macd_hist > 0:  buy_score  += 1
         elif macd_hist < 0:  sell_score += 1
 
-        # ── CORE 4: VOLUME (max 2 pts, tiered) ───────────────────────────
+        # CORE 5: Volume quality (+2)
         if vol_ratio >= 2.0:
             buy_score += 2; sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x surge")
         elif vol_ratio >= 1.5:
             buy_score += 1; sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x")
-        elif vol_ratio < 1.0:
-            buy_score -= 1; sell_score -= 1  # below avg volume — penalty only
 
-        # ════════════════════════════════════════════════════
-        # OPTIONAL SIGNALS (max +2 combined) — supporting evidence
-        # ════════════════════════════════════════════════════
+        # OPTIONAL: S/R, candle pattern, BB squeeze (capped at +2)
         optional_score = 0
-
-        # S/R proximity (+1 only, reduced from +2)
         near_sup, near_res = find_sr_levels(df, close)
-        if near_sup and ema_short > ema_long:
+        if near_sup and ema_bullish:
             optional_score += 1; reasons.append("Near support")
-        if near_res and ema_short <= ema_long:
+        if near_res and ema_bearish:
             optional_score += 1; reasons.append("Near resistance")
 
-        # Candle pattern (+1 only, reduced from +2)
         bull_c, bear_c, c_name = detect_candle_pattern(df)
-        if bull_c and ema_short > ema_long:
+        if bull_c and ema_bullish:
             optional_score += 1; reasons.append(c_name)
-        elif bear_c and ema_short <= ema_long:
+        elif bear_c and ema_bearish:
             optional_score += 1; reasons.append(c_name)
 
-        # BB squeeze bonus (+1 max — signals potential breakout)
         avg_bb_width = df["BB_Width"].tail(50).mean()
         if bb_width < avg_bb_width * 0.75:
             optional_score += 1; reasons.append("BB squeeze")
 
-        # Cap optional contribution at +2 to prevent overfitting
         optional_score = min(optional_score, 2)
         buy_score  += optional_score
         sell_score += optional_score
 
-        # ── OVEREXTENSION CHECK ───────────────────────────────────────────
+        # Overextension penalty
         ema_dist_pct = abs(close - ema_short) / ema_short * 100
         if ema_dist_pct > 3.0:
             buy_score -= 1; sell_score -= 1
             reasons.append(f"Extended {ema_dist_pct:.1f}% from EMA")
 
-        # ── Determine raw signal ───────────────────────────────────────────
+        # ── Determine raw signal ──────────────────────────────────────────
         if buy_score >= MIN_SCORE:
             signal, score = "BUY", buy_score
         elif sell_score >= MIN_SCORE:
@@ -706,23 +946,34 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         else:
             return None
 
-        # ── 9. CONTEXT — score penalty instead of hard rejection ──────────
+        # ════════════════════════════════════════════════════════════
+        # DAILY TIMEFRAME CONFIRMATION + daily ATR for SL
+        # ════════════════════════════════════════════════════════════
+        stock_trend, daily_atr, daily_rsi, daily_ema_bull = get_stock_daily_data(symbol)
+
         penalty_reasons = []
 
-        # Market trend mismatch → -2 penalty
+        # Daily trend mismatch → -2 penalty
+        if signal == "BUY"  and stock_trend == "bearish":
+            score -= 2; penalty_reasons.append("Daily bearish(-2)")
+        elif signal == "SELL" and stock_trend == "bullish":
+            score -= 2; penalty_reasons.append("Daily bullish(-2)")
+
+        # Higher timeframe confirmation:
+        # BUY: daily RSI should be > 45 (not in deep downtrend)
+        # SELL: daily RSI should be < 55
+        if signal == "BUY" and daily_rsi < 45:
+            score -= 1; penalty_reasons.append(f"Daily RSI weak({daily_rsi:.0f})")
+        elif signal == "SELL" and daily_rsi > 55:
+            score -= 1; penalty_reasons.append(f"Daily RSI strong({daily_rsi:.0f})")
+
+        # Nifty trend penalty
         if signal == "BUY"  and nifty_trend == "bearish":
             score -= 2; penalty_reasons.append("Nifty bearish(-2)")
         elif signal == "SELL" and nifty_trend == "bullish":
             score -= 2; penalty_reasons.append("Nifty bullish(-2)")
 
-        # Stock daily trend mismatch → -2 penalty
-        stock_trend = get_stock_trend(symbol)
-        if signal == "BUY"  and stock_trend == "bearish":
-            score -= 2; penalty_reasons.append("Stock trend bearish(-2)")
-        elif signal == "SELL" and stock_trend == "bullish":
-            score -= 2; penalty_reasons.append("Stock trend bullish(-2)")
-
-        # News sentiment → -1 penalty (softer than trend)
+        # News sentiment penalty
         _, sentiment_label = get_news_sentiment(symbol)
         if signal == "BUY"  and sentiment_label == "Negative":
             score -= 1; penalty_reasons.append("News negative(-1)")
@@ -732,17 +983,26 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         if penalty_reasons:
             reasons.append("Penalties: " + ", ".join(penalty_reasons))
 
-        # After penalties, re-check score threshold
         if score < MIN_SCORE:
             return None
 
-        # ── 10. STOP LOSS & TARGET ────────────────────────────────────────
+        # ════════════════════════════════════════════════════════════
+        # SL USING DAILY ATR (not 15-min ATR)
+        # Daily ATR is typically 5-10x the 15-min ATR — much more
+        # realistic and prevents wick-based false SL triggers
+        # ════════════════════════════════════════════════════════════
+        # Use daily ATR if available, else fall back to 15-min ATR * 4
+        effective_atr = daily_atr if daily_atr > 0 else atr_15m * 4
+        # Minimum SL of 0.5% of price
+        min_sl_dist   = close * 0.005
+        sl_dist       = max(ATR_MULT * effective_atr, min_sl_dist)
+
         if signal == "BUY":
-            stop_loss = round(close - ATR_MULT * atr, 2)
-            target    = round(close + (close - stop_loss) * RISK_REWARD, 2)
+            stop_loss = round(close - sl_dist, 2)
+            target    = round(close + sl_dist * RISK_REWARD, 2)
         else:
-            stop_loss = round(close + ATR_MULT * atr, 2)
-            target    = round(close - (stop_loss - close) * RISK_REWARD, 2)
+            stop_loss = round(close + sl_dist, 2)
+            target    = round(close - sl_dist * RISK_REWARD, 2)
 
         # Final RR sanity check
         risk   = abs(close - stop_loss)
@@ -750,20 +1010,25 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         if risk == 0 or reward / risk < RISK_REWARD * 0.9:
             return None
 
+        data_source = source_log[0] if source_log else "unknown"
         return {
-            "symbol":     symbol,
-            "signal":     signal,
-            "entry":      round(close, 2),
-            "target":     target,
-            "stop_loss":  stop_loss,
-            "score":      score,
-            "rsi":        round(rsi, 1),
-            "adx":        round(adx, 1),
-            "vol_ratio":  round(vol_ratio, 1),
-            "sentiment":  sentiment_label,
-            "candle":     c_name or "—",
-            "reasons":    " | ".join(reasons),
-            "time":       datetime.now(IST).strftime("%H:%M:%S IST"),
+            "symbol":      symbol,
+            "signal":      signal,
+            "entry":       round(close, 2),
+            "target":      target,
+            "stop_loss":   stop_loss,
+            "score":       score,
+            "rsi":         round(rsi, 1),
+            "adx":         round(adx, 1),
+            "vol_ratio":   round(vol_ratio, 1),
+            "daily_atr":   round(effective_atr, 2),
+            "daily_rsi":   daily_rsi,
+            "sentiment":   sentiment_label,
+            "candle":      c_name or "—",
+            "reasons":     " | ".join(reasons),
+            "time":        datetime.now(IST).strftime("%H:%M:%S IST"),
+            "data_source": data_source,
+            "current_price": round(close, 2),   # populated fresh at signal time
         }
     except Exception:
         return None
@@ -910,18 +1175,12 @@ def check_open_trades():
         try:
             df = None
 
-            # ── Try Kite first ────────────────────────────────────────────
-            if kite_active:
-                df = kite_get_candles(trade["symbol"], days=2)
+            # ── Use fetch_candles (Kite first, yfinance fallback) ────────────
+            df = fetch_candles(trade["symbol"], interval="15minute", days=2)
 
-            # ── Fall back to yfinance ─────────────────────────────────────
+            # ── Fall back to fetch_candles (which itself falls back to yfinance) ──
             if df is None or len(df) == 0:
-                raw = yf.download(trade["symbol"] + ".NS", period="2d",
-                                  interval="15m", progress=False, auto_adjust=True)
-                if raw is not None and len(raw) > 0:
-                    raw.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
-                    raw.dropna(inplace=True)
-                    df = raw
+                df = fetch_candles(trade["symbol"], interval="15minute", days=2)
 
             if df is None or len(df) == 0:
                 continue
@@ -964,8 +1223,13 @@ def run_background_scan():
     scan_state["total"]     = len(NIFTY100_SYMBOLS)
 
     try:
-        nifty_trend  = get_nifty_trend()
+        nifty_trend, nifty_adx = get_nifty_trend()
         signal_count = 0
+
+        # ── Nifty ADX gate — skip entire scan if market is choppy ─────────
+        if nifty_adx < NIFTY_ADX_GATE:
+            print(f"[scheduler] Nifty ADX={nifty_adx:.1f} < {NIFTY_ADX_GATE} — market choppy, scan skipped")
+            return
 
         for idx, symbol in enumerate(NIFTY100_SYMBOLS, 1):
             if scan_state["stop_flag"]:
@@ -990,9 +1254,13 @@ def run_background_scan():
                 )
                 if fingerprint not in scan_state["notified_today"]:
                     scan_state["notified_today"][fingerprint] = today
-                    send_telegram(result)
-                    add_trade(result)   # register in trade tracker
-                    print(f"[scheduler] {result['signal']} signal: {result['symbol']} score={result['score']}")
+                    add_trade(result)   # always register in trade tracker
+                    ok, reason = should_notify_telegram(result)
+                    if ok:
+                        send_telegram(result)
+                        print(f"[scheduler] {result['signal']} signal: {result['symbol']} score={result['score']} → Telegram sent")
+                    else:
+                        print(f"[scheduler] {result['signal']} signal: {result['symbol']} score={result['score']} → Telegram skipped ({reason})")
 
         scan_state["last_scan"] = datetime.now(IST).isoformat()
         print(f"[scheduler] Scan complete — {signal_count} signal(s) found")
@@ -1049,16 +1317,26 @@ async def status(auth: bool = Depends(verify_auth)):
     """Quick health check + market state + Nifty trend."""
     ist_now = datetime.now(IST).strftime("%d %b %Y %H:%M:%S IST")
     loop = asyncio.get_event_loop()
-    trend = await loop.run_in_executor(None, get_nifty_trend)
+    trend, nifty_adx = await loop.run_in_executor(None, get_nifty_trend)
     return {
-        "market_open": market_is_open(),
-        "ist_time":    ist_now,
-        "nifty_trend": trend,
-        "talib":       TALIB,
-        "symbols":     len(NIFTY100_SYMBOLS),
-        "scan_running": scan_state["running"],
-        "min_score":   MIN_SCORE,
-        "risk_reward": RISK_REWARD,
+        "market_open":    market_is_open(),
+        "ist_time":       ist_now,
+        "nifty_trend":    trend,
+        "nifty_adx":      nifty_adx,
+        "nifty_adx_gate": NIFTY_ADX_GATE,
+        "talib":          TALIB,
+        "symbols":        len(NIFTY100_SYMBOLS),
+        "scan_running":   scan_state["running"],
+        "min_score":      MIN_SCORE,
+        "risk_reward":    RISK_REWARD,
+        "kite_active":    kite_get() is not None,
+        "tg_filters": {
+            "min_score":   TG_MIN_SCORE,
+            "min_adx":     TG_MIN_ADX,
+            "min_rr":      TG_MIN_RR,
+            "news_filter": TG_NEWS_FILTER or "Any",
+            "data_source": TG_DATA_SOURCE or "Any",
+        },
     }
 
 
@@ -1096,8 +1374,13 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
 
         try:
             # Get Nifty trend first
-            nifty_trend = await loop.run_in_executor(None, get_nifty_trend)
-            yield f"data: {json.dumps({'type':'start','total':len(symbol_list),'nifty_trend':nifty_trend})}\n\n"
+            nifty_trend, nifty_adx = await loop.run_in_executor(None, get_nifty_trend)
+            yield f"data: {json.dumps({'type':'start','total':len(symbol_list),'nifty_trend':nifty_trend,'nifty_adx':nifty_adx})}\n\n"
+
+            # Nifty ADX gate
+            if nifty_adx < NIFTY_ADX_GATE:
+                yield f"data: {json.dumps({'type':'done','total_signals':0,'scanned':0,'skipped':True,'reason':f'Nifty ADX={nifty_adx:.1f} < {NIFTY_ADX_GATE} — market too choppy'})}\n\n"
+                return
 
             signal_count = 0
             for idx, symbol in enumerate(symbol_list, 1):
@@ -1131,8 +1414,10 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
                     )
                     if fingerprint not in scan_state["notified_today"]:
                         scan_state["notified_today"][fingerprint] = today
-                        threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
-                        add_trade(result)   # register in trade tracker
+                        add_trade(result)   # always register in trade tracker
+                        ok, reason = should_notify_telegram(result)
+                        if ok:
+                            threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
 
             scan_state["last_scan"] = datetime.now(IST).isoformat()
             yield f"data: {json.dumps({'type':'done','total_signals':signal_count,'scanned':len(symbol_list)})}\n\n"
@@ -1317,6 +1602,68 @@ async def kite_status(auth: bool = Depends(verify_auth)):
     })
 
 
+@app.get("/quotes")
+async def get_quotes(symbols: str = "", auth: bool = Depends(verify_auth)):
+    """
+    Fetch current live prices for a list of symbols.
+    Used by UI to show live price vs entry/target/SL.
+    ?symbols=RELIANCE,TCS,INFY
+    Kite if logged in, else yfinance fallback.
+    """
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        return JSONResponse({"quotes": {}})
+
+    quotes = {}
+    kite   = kite_get()
+
+    if kite:
+        # Batch fetch from Kite — single API call for all symbols
+        try:
+            instruments = [f"NSE:{s}" for s in symbol_list]
+            data        = kite.quote(instruments)
+            for sym in symbol_list:
+                key  = f"NSE:{sym}"
+                item = data.get(key, {})
+                if item:
+                    quotes[sym] = {
+                        "price":  item.get("last_price", 0),
+                        "change": round(item.get("net_change", 0), 2),
+                        "source": "kite",
+                    }
+        except Exception as e:
+            print(f"[quotes] Kite batch error: {e}")
+
+    # yfinance fallback for any symbols not fetched via Kite
+    missing = [s for s in symbol_list if s not in quotes]
+    if missing:
+        loop = asyncio.get_event_loop()
+        def fetch_yf_prices():
+            result = {}
+            try:
+                tickers = " ".join(s + ".NS" for s in missing)
+                data    = yf.download(tickers, period="1d", interval="1m",
+                                      progress=False, auto_adjust=True)
+                if data is not None and len(data) > 0:
+                    if len(missing) == 1:
+                        price = float(data["Close"].iloc[-1])
+                        result[missing[0]] = {"price": round(price, 2), "change": 0, "source": "yfinance"}
+                    else:
+                        for sym in missing:
+                            try:
+                                price = float(data["Close"][sym + ".NS"].iloc[-1])
+                                result[sym] = {"price": round(price, 2), "change": 0, "source": "yfinance"}
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            return result
+        yf_prices = await loop.run_in_executor(None, fetch_yf_prices)
+        quotes.update(yf_prices)
+
+    return JSONResponse({"quotes": quotes})
+
+
 @app.get("/tracker/trades")
 async def tracker_trades(auth: bool = Depends(verify_auth)):
     """Returns all trades for the current week with their outcomes."""
@@ -1337,6 +1684,52 @@ async def tracker_reset(auth: bool = Depends(verify_auth)):
     trade_tracker["trades"]     = []
     trade_tracker["week_start"] = get_week_start()
     return {"reset": True, "week_start": trade_tracker["week_start"]}
+
+
+@app.get("/prices")
+async def get_prices(symbols: str = "", auth: bool = Depends(verify_auth)):
+    """
+    Fetch current live prices for a comma-separated list of symbols.
+    Uses Kite quote if logged in, else yfinance last close.
+    Returns: {SYMBOL: {price, change_pct}, ...}
+    """
+    if not symbols:
+        return JSONResponse({})
+
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    result = {}
+    loop   = asyncio.get_event_loop()
+
+    async def fetch_one(sym):
+        def _fetch():
+            kite = kite_get()
+            if kite:
+                try:
+                    q    = kite.quote([f"NSE:{sym}"])
+                    data = q.get(f"NSE:{sym}", {})
+                    lp   = data.get("last_price", 0)
+                    prev = data.get("ohlc", {}).get("close", lp) or lp
+                    chg  = round((lp - prev) / prev * 100, 2) if prev else 0
+                    return {"price": lp, "change_pct": chg, "source": "kite"}
+                except Exception:
+                    pass
+            # yfinance fallback — use last close
+            try:
+                tk = yf.Ticker(sym + ".NS")
+                info = tk.fast_info
+                lp   = float(info.last_price or 0)
+                prev = float(info.previous_close or lp)
+                chg  = round((lp - prev) / prev * 100, 2) if prev else 0
+                return {"price": lp, "change_pct": chg, "source": "yfinance"}
+            except Exception:
+                return {"price": 0, "change_pct": 0, "source": "error"}
+
+        return sym, await loop.run_in_executor(None, _fetch)
+
+    # Fetch all symbols concurrently
+    tasks   = [fetch_one(s) for s in symbol_list]
+    results = await asyncio.gather(*tasks)
+    return JSONResponse({sym: data for sym, data in results})
 
 
 @app.get("/")
