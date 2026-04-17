@@ -360,6 +360,31 @@
     .chart-close:hover { color:var(--red); }
     .chart-frame { flex:1; border:none; }
 
+    /* ── FILTER PANEL ── */
+    .filter-panel {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 14px; margin-bottom: 12px;
+      display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+    }
+    .filter-group { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-dim); }
+    .filter-group label { white-space:nowrap; font-size:10px; text-transform:uppercase; letter-spacing:0.8px; }
+    .filter-group select, .filter-group input[type=range] {
+      background:var(--surface2); border:1px solid var(--border2); color:var(--text);
+      padding:3px 8px; border-radius:4px; font-family:var(--mono); font-size:11px; cursor:pointer;
+    }
+    .filter-val { color:var(--amber); font-weight:600; min-width:28px; text-align:center; }
+    .filter-reset {
+      margin-left:auto; font-size:10px; color:var(--text-muted); cursor:pointer;
+      background:none; border:none; font-family:var(--mono); transition:color 0.15s;
+    }
+    .filter-reset:hover { color:var(--red); }
+    .filter-summary {
+      font-size:10px; color:var(--text-dim);
+      padding: 4px 10px; background:var(--surface2);
+      border-radius:3px; border:1px solid var(--border);
+    }
+    .filter-summary span { color:var(--blue); font-weight:600; }
+
     /* ── RESPONSIVE ── */
     @media (max-width: 900px) {
       .metrics-row { grid-template-columns: repeat(3,1fr); }
@@ -368,6 +393,7 @@
     @media (max-width: 600px) {
       .metrics-row { grid-template-columns: repeat(2,1fr); }
       .perf-grid   { grid-template-columns: repeat(2,1fr); }
+      .filter-panel { gap:12px; }
     }
   </style>
 </head>
@@ -438,31 +464,63 @@
     </div>
   </div>
 
-  <!-- CONTROLS -->
+  <!-- CONTROLS ROW 1: Signal type + scan -->
   <div class="controls-row">
     <button class="filter-btn active all" id="btnAll"  onclick="setFilter('ALL')">ALL</button>
     <button class="filter-btn buy"        id="btnBuy"  onclick="setFilter('BUY')">BUY</button>
     <button class="filter-btn sell"       id="btnSell" onclick="setFilter('SELL')">SELL</button>
     <input  class="sym-input" id="symInput" type="text"
-            placeholder="Override symbols: RELIANCE,TCS,INFY" title="Comma-separated symbols to scan (blank = full Nifty 100)" />
-    <div class="score-filter">
-      Min Score:
-      <select id="minScore" onchange="renderTable()">
-        <option value="0">All</option>
-        <option value="9" selected>9+</option>
-        <option value="10">10+</option>
-        <option value="11">11+</option>
-      </select>
-    </div>
-    <div class="auto-scan-wrap" id="autoWrap" onclick="toggleAutoScan()" title="Auto-scan every 15 minutes during market hours">
-      <div class="toggle-track" id="toggleTrack">
-        <div class="toggle-knob"></div>
-      </div>
+            placeholder="Override symbols: RELIANCE,TCS,INFY" />
+    <div class="auto-scan-wrap" id="autoWrap" onclick="toggleAutoScan()">
+      <div class="toggle-track" id="toggleTrack"><div class="toggle-knob"></div></div>
       <span class="auto-label" id="autoLabel">Auto 15 min</span>
       <span class="countdown-badge" id="countdown"></span>
     </div>
     <button class="scan-btn" id="scanBtn" onclick="startScan()">&#9654; SCAN</button>
     <button class="stop-btn" id="stopBtn" onclick="stopScan()">&#9632; STOP</button>
+  </div>
+
+  <!-- FILTER PANEL -->
+  <div class="filter-panel">
+    <div class="filter-group">
+      <label>Min Score</label>
+      <input type="range" id="fScore" min="0" max="13" value="7" step="1"
+             style="width:90px" oninput="updateFilters()"/>
+      <span class="filter-val" id="fScoreVal">7</span>
+    </div>
+    <div class="filter-group">
+      <label>Min ADX</label>
+      <input type="range" id="fAdx" min="0" max="50" value="25" step="5"
+             style="width:90px" oninput="updateFilters()"/>
+      <span class="filter-val" id="fAdxVal">25</span>
+    </div>
+    <div class="filter-group">
+      <label>Min R/R</label>
+      <select id="fRR" onchange="updateFilters()">
+        <option value="0">Any</option>
+        <option value="1.5">1.5+</option>
+        <option value="2" selected>2.0+</option>
+        <option value="2.5">2.5+</option>
+        <option value="3">3.0+</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>News</label>
+      <select id="fNews" onchange="updateFilters()">
+        <option value="">Any</option>
+        <option value="Positive">Positive only</option>
+        <option value="Neutral">Neutral+</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Data</label>
+      <select id="fSource" onchange="updateFilters()">
+        <option value="">Any</option>
+        <option value="kite">Kite only</option>
+      </select>
+    </div>
+    <div class="filter-summary" id="filterSummary">Showing <span id="fCount">—</span> of <span id="fTotal">—</span></div>
+    <button class="filter-reset" onclick="resetFilters()">&#8635; Reset filters</button>
   </div>
 
   <!-- TABS -->
@@ -500,11 +558,12 @@
             <th style="width:70px">News</th>
             <th style="width:95px">Candle</th>
             <th style="width:65px">Time</th>
+            <th style="width:55px">Source</th>
             <th>Reasons</th>
           </tr>
         </thead>
         <tbody id="signalBody">
-          <tr><td colspan="12">
+          <tr><td colspan="13">
             <div class="empty-state">
               <div class="icon">&#9782;</div>
               Connect to your API server, then click SCAN
@@ -690,7 +749,11 @@ async function checkConnection() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     setConnected(true);
-    logAdd(`Connected ✓  TA-Lib:${data.talib} | Symbols:${data.symbols} | MIN_SCORE:${data.min_score} | R/R:${data.risk_reward}`, 'info');
+    logAdd(`Connected ✓  Symbols:${data.symbols} | MIN_SCORE:${data.min_score} | R/R:${data.risk_reward}`, 'info');
+    if (data.tg_filters) {
+      const f = data.tg_filters;
+      logAdd(`Telegram filters → Score≥${f.min_score} | ADX≥${f.min_adx} | R/R≥${f.min_rr} | News:${f.news_filter} | Source:${f.data_source}`, 'warn');
+    }
 
     // Update Nifty badge
     const badge = document.getElementById('niftyBadge');
@@ -717,12 +780,14 @@ function setFilter(f) {
   const cls = {ALL:'all',BUY:'buy',SELL:'sell'};
   document.getElementById(map[f]).classList.add('active', cls[f]);
   renderTable();
+  updateMetrics();
 }
 
 function sortBy(key) {
   if (sortKey===key) sortDir*=-1; else { sortKey=key; sortDir=-1; }
   document.querySelectorAll('th').forEach(th=>th.classList.remove('sorted'));
   renderTable();
+  updateMetrics();
 }
 
 // ── SCORE BAR ─────────────────────────────────────────────────────────────
@@ -737,20 +802,63 @@ function scoreBar(score) {
 }
 
 // ── RENDER TABLE ──────────────────────────────────────────────────────────
+function getFiltered() {
+  const minScore  = parseFloat(document.getElementById('fScore').value)  || 0;
+  const minAdx    = parseFloat(document.getElementById('fAdx').value)    || 0;
+  const minRR     = parseFloat(document.getElementById('fRR').value)     || 0;
+  const newsFilter= document.getElementById('fNews').value;
+  const srcFilter = document.getElementById('fSource').value;
+
+  return allSignals.filter(s => {
+    if (displayFilter !== 'ALL' && s.signal !== displayFilter) return false;
+    if (s.score < minScore) return false;
+    if (s.adx   < minAdx)  return false;
+    // RR calc
+    if (minRR > 0) {
+      const risk   = Math.abs(s.entry - s.stop_loss);
+      const reward = Math.abs(s.target - s.entry);
+      if (risk === 0 || reward / risk < minRR) return false;
+    }
+    if (newsFilter === 'Positive' && s.sentiment !== 'Positive') return false;
+    if (newsFilter === 'Neutral'  && s.sentiment === 'Negative') return false;
+    if (srcFilter  === 'kite'     && s.data_source !== 'kite')   return false;
+    return true;
+  });
+}
+
+function updateFilters() {
+  // Sync slider display values
+  const score = document.getElementById('fScore').value;
+  const adx   = document.getElementById('fAdx').value;
+  document.getElementById('fScoreVal').textContent = score;
+  document.getElementById('fAdxVal').textContent   = adx;
+  renderTable();
+  updateMetrics();
+}
+
+function resetFilters() {
+  document.getElementById('fScore').value  = '7';
+  document.getElementById('fAdx').value    = '25';
+  document.getElementById('fRR').value     = '2';
+  document.getElementById('fNews').value   = '';
+  document.getElementById('fSource').value = '';
+  updateFilters();
+}
+
 function renderTable() {
-  const minScore = parseInt(document.getElementById('minScore').value) || 0;
-  let filtered = allSignals.filter(s =>
-    (displayFilter==='ALL' || s.signal===displayFilter) && s.score>=minScore
-  );
+  let filtered = getFiltered();
   filtered.sort((a,b) => {
     const av=a[sortKey], bv=b[sortKey];
     if (typeof av==='string') return sortDir*av.localeCompare(bv);
     return sortDir*(av-bv);
   });
+  // Update filter summary
+  document.getElementById('fCount').textContent = filtered.length;
+  document.getElementById('fTotal').textContent = allSignals.length;
   document.getElementById('tableCount').textContent = filtered.length + ' signal' + (filtered.length===1?'':'s');
   const body = document.getElementById('signalBody');
   if (!filtered.length) {
-    body.innerHTML = `<tr><td colspan="12"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="13"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
     return;
   }
   body.innerHTML = filtered.map(r => {
@@ -771,6 +879,8 @@ function renderTable() {
       <td><span class="sentiment-badge ${r.sentiment}">${r.sentiment}</span></td>
       <td style="color:var(--text-dim);font-size:10px;">${r.candle||'—'}</td>
       <td class="time-cell">${r.time||''}</td>
+      <td style="font-size:9px;text-align:center;color:${r.data_source==='kite'?'var(--green)':'var(--text-muted)'};">
+        ${r.data_source==='kite'?'KITE':'YF'}</td>
       <td class="reasons-cell" title="${r.reasons}">${r.reasons}</td>
     </tr>`;
   }).join('');
@@ -778,16 +888,18 @@ function renderTable() {
 
 // ── UPDATE METRICS ────────────────────────────────────────────────────────
 function updateMetrics() {
-  const buys  = allSignals.filter(s=>s.signal==='BUY');
-  const sells = allSignals.filter(s=>s.signal==='SELL');
-  const high  = allSignals.filter(s=>s.score>=10);
-  const avg   = allSignals.length
-    ? (allSignals.reduce((a,s)=>a+s.score,0)/allSignals.length).toFixed(1) : '—';
-  document.getElementById('mTotal').textContent = allSignals.length || '—';
-  document.getElementById('mBuy').textContent   = buys.length  || '—';
-  document.getElementById('mSell').textContent  = sells.length || '—';
+  // Metrics always show FILTERED counts so they match what's visible in the table
+  const filtered = getFiltered();
+  const buys  = filtered.filter(s=>s.signal==='BUY');
+  const sells = filtered.filter(s=>s.signal==='SELL');
+  const high  = filtered.filter(s=>s.score>=10);
+  const avg   = filtered.length
+    ? (filtered.reduce((a,s)=>a+s.score,0)/filtered.length).toFixed(1) : '—';
+  document.getElementById('mTotal').textContent = filtered.length || '—';
+  document.getElementById('mBuy').textContent   = buys.length    || '—';
+  document.getElementById('mSell').textContent  = sells.length   || '—';
   document.getElementById('mAvg').textContent   = avg;
-  document.getElementById('mHigh').textContent  = high.length  || '—';
+  document.getElementById('mHigh').textContent  = high.length    || '—';
 }
 
 // ── AUTO-SCAN ─────────────────────────────────────────────────────────────
