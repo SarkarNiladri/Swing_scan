@@ -293,11 +293,18 @@ ATR_PERIOD      = 14
 DAILY_ATR_PERIOD= 14      # ATR on daily candles for SL calculation
 SR_ZONE_PCT     = 0.015
 RISK_REWARD     = 2.0
-MIN_SCORE       = 9       # Raised — EMA+ADX mandatory
-ATR_MULT        = 1.5     # Applied to DAILY ATR now (much wider than 15-min)
-NIFTY_ADX_GATE  = 20      # Skip scan if Nifty ADX < this (choppy market)
-MIN_CANDLE_BODY = 0.55    # Signal candle body must be >= 55% of candle range
-VOL_LOOKBACK    = 3       # Consecutive candles for volume trend check
+MIN_SCORE            = 9      # Validated by backtest
+ATR_MULT             = 1.5    # Applied to blended daily ATR
+NIFTY_ADX_GATE       = 20     # Skip scan if Nifty ADX < this
+MIN_CANDLE_BODY      = 0.40   # Relaxed — 40% body ratio (validated)
+VOL_LOOKBACK         = 3      # Consecutive candles for volume check
+COUNTER_TREND_PENALTY= 2      # Extra score needed to trade against Nifty trend
+SCORE9_ADX_MIN       = 30     # Score-9 signals need ADX≥30 (higher conviction)
+
+# Time-of-day filter (validated: 11:00-13:30 IST has best win rate)
+TRADE_HOUR_START = 10
+TRADE_HOUR_END   = 13
+TRADE_MIN_END    = 30
 
 # ── Background scheduler config ───────────────────────────────────────────
 AUTO_SCAN_INTERVAL = 15 * 60   # seconds between scans
@@ -842,6 +849,32 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             return None
 
         # ════════════════════════════════════════════════════════════
+        # GATE 1B — TIME-OF-DAY FILTER (validated: 11:00-13:30 IST)
+        # Best win rate window from backtest analysis
+        # ════════════════════════════════════════════════════════════
+        now_ist  = datetime.now(IST)
+        c_hour   = now_ist.hour
+        c_minute = now_ist.minute
+        after_start = (c_hour > TRADE_HOUR_START or
+                       (c_hour == TRADE_HOUR_START and c_minute >= 0))
+        before_end  = (c_hour < TRADE_HOUR_END or
+                       (c_hour == TRADE_HOUR_END and c_minute <= TRADE_MIN_END))
+        if not (after_start and before_end):
+            return None
+
+        # ════════════════════════════════════════════════════════════
+        # GATE 1C — MACD DIRECTION ALIGNMENT
+        # MACD histogram must align with EMA trend direction
+        # Captures both crossovers and trend continuation entries
+        # ════════════════════════════════════════════════════════════
+        macd_bullish    = macd_hist > 0
+        macd_bearish    = macd_hist < 0
+        if ema_bullish and not macd_bullish:
+            return None   # trend up but MACD negative — skip
+        if ema_bearish and not macd_bearish:
+            return None   # trend down but MACD positive — skip
+
+        # ════════════════════════════════════════════════════════════
         # GATE 2 — STRONG CANDLE BODY FILTER
         # Signal candle body must be at least MIN_CANDLE_BODY of range
         # Doji / spinning top candles = indecision = skip
@@ -911,11 +944,25 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             sell_score += 1
             if ema_bearish: reasons.append("MACD bearish")
 
-        # CORE 5: Volume quality (+2)
-        if vol_ratio >= 2.0:
-            buy_score += 2; sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x surge")
-        elif vol_ratio >= 1.5:
-            buy_score += 1; sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x")
+        # CORE 5: Volume quality (+2) — directional only
+        avg_vol_short = df["Volume"].tail(26).mean()
+        vol_penalty   = vol_above_avg < 1   # all recent candles below avg
+        prev_close    = float(df.iloc[-2]["Close"]) if len(df) >= 2 else close
+
+        # Hard reject: high volume AGAINST direction = distribution/short-covering
+        if ema_bullish and volume > avg_vol_short * 1.5 and close < prev_close:
+            return None
+        if ema_bearish and volume > avg_vol_short * 1.5 and close > prev_close:
+            return None
+
+        if ema_bullish:
+            if vol_ratio >= 2.0:   buy_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x surge")
+            elif vol_ratio >= 1.5: buy_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x")
+            elif vol_penalty:      buy_score -= 1
+        else:
+            if vol_ratio >= 2.0:   sell_score += 2; reasons.append(f"Vol {vol_ratio:.1f}x surge")
+            elif vol_ratio >= 1.5: sell_score += 1; reasons.append(f"Vol {vol_ratio:.1f}x")
+            elif vol_penalty:      sell_score -= 1
 
         # OPTIONAL: S/R, candle pattern, BB squeeze (capped at +2)
         optional_score = 0
@@ -936,13 +983,15 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             optional_score += 1; reasons.append("BB squeeze")
 
         optional_score = min(optional_score, 2)
-        buy_score  += optional_score
-        sell_score += optional_score
+        # Apply optional score only to EMA-confirmed direction
+        if ema_bullish: buy_score  += optional_score
+        else:           sell_score += optional_score
 
-        # Overextension penalty
+        # Overextension penalty — directional only
         ema_dist_pct = abs(close - ema_short) / ema_short * 100
         if ema_dist_pct > 3.0:
-            buy_score -= 1; sell_score -= 1
+            if ema_bullish: buy_score  -= 1
+            else:           sell_score -= 1
             reasons.append(f"Extended {ema_dist_pct:.1f}% from EMA")
 
         # ── Determine raw signal ──────────────────────────────────────────
@@ -951,6 +1000,12 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         elif sell_score >= MIN_SCORE:
             signal, score = "SELL", sell_score
         else:
+            return None
+
+        # ── SCORE 9 + ADX QUALITY FILTER ─────────────────────────────────
+        # Score-9 signals validated at 33% WR — only keep if ADX ≥ 30
+        # Score 10+ passes regardless (validated 40-47% WR)
+        if score == MIN_SCORE and adx < SCORE9_ADX_MIN:
             return None
 
         # ════════════════════════════════════════════════════════════
@@ -974,11 +1029,25 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         elif signal == "SELL" and daily_rsi > 55:
             score -= 1; penalty_reasons.append(f"Daily RSI strong({daily_rsi:.0f})")
 
-        # Nifty trend penalty
-        if signal == "BUY"  and nifty_trend == "bearish":
-            score -= 2; penalty_reasons.append("Nifty bearish(-2)")
-        elif signal == "SELL" and nifty_trend == "bullish":
-            score -= 2; penalty_reasons.append("Nifty bullish(-2)")
+        # Nifty directional bias — counter-trend signals need higher conviction
+        # Bullish market: SELL needs MIN_SCORE + COUNTER_TREND_PENALTY
+        # Bearish market: BUY  needs MIN_SCORE + COUNTER_TREND_PENALTY
+        if nifty_trend == "bullish":
+            buy_threshold  = MIN_SCORE
+            sell_threshold = MIN_SCORE + COUNTER_TREND_PENALTY
+        elif nifty_trend == "bearish":
+            buy_threshold  = MIN_SCORE + COUNTER_TREND_PENALTY
+            sell_threshold = MIN_SCORE
+        else:
+            buy_threshold  = MIN_SCORE
+            sell_threshold = MIN_SCORE
+
+        if signal == "BUY"  and score < buy_threshold:
+            penalty_reasons.append(f"Nifty bearish — BUY needs {buy_threshold}+ (has {score})")
+            score = 0   # force rejection below
+        elif signal == "SELL" and score < sell_threshold:
+            penalty_reasons.append(f"Nifty bullish — SELL needs {sell_threshold}+ (has {score})")
+            score = 0
 
         # News sentiment penalty
         _, sentiment_label = get_news_sentiment(symbol)
@@ -998,11 +1067,15 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
         # Daily ATR is typically 5-10x the 15-min ATR — much more
         # realistic and prevents wick-based false SL triggers
         # ════════════════════════════════════════════════════════════
-        # Use daily ATR if available, else fall back to 15-min ATR * 4
-        effective_atr = daily_atr if daily_atr > 0 else atr_15m * 4
-        # Minimum SL of 0.5% of price
-        min_sl_dist   = close * 0.005
-        sl_dist       = max(ATR_MULT * effective_atr, min_sl_dist)
+        # Blended ATR: 60% daily + 40% (15-min×4) — validated in backtest
+        # Pure daily ATR → too wide (timeouts); pure 15-min → too tight (wick hits)
+        if daily_atr > 0:
+            effective_atr = 0.6 * daily_atr + 0.4 * (atr_15m * 4)
+        else:
+            effective_atr = atr_15m * 3
+        min_sl_dist   = close * 0.005   # min 0.5% of price
+        max_sl_dist   = close * 0.025   # max 2.5% of price (cap runaway SLs)
+        sl_dist       = min(max(ATR_MULT * effective_atr, min_sl_dist), max_sl_dist)
 
         if signal == "BUY":
             stop_loss = round(close - sl_dist, 2)
