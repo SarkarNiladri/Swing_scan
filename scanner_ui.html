@@ -620,6 +620,7 @@
             <th style="width:80px"  onclick="sortBy('current_price')">Live ₹</th>
             <th style="width:70px"  onclick="sortBy('target')">Target ₹</th>
             <th style="width:70px"  onclick="sortBy('stop_loss')">SL ₹</th>
+            <th style="width:72px"  onclick="sortBy('ai_confidence')">AI Conf <span class="sort-arrow">↕</span></th>
             <th style="width:110px">Live Price</th>
             <th style="width:42px"  onclick="sortBy('rsi')">RSI</th>
             <th style="width:42px"  onclick="sortBy('adx')">ADX</th>
@@ -632,7 +633,7 @@
           </tr>
         </thead>
         <tbody id="signalBody">
-          <tr><td colspan="14">
+          <tr><td colspan="15">
             <div class="empty-state">
               <div class="icon">&#9782;</div>
               Connect to your API server, then click SCAN
@@ -931,7 +932,7 @@ function renderTable() {
   document.getElementById('tableCount').textContent = filtered.length + ' signal' + (filtered.length===1?'':'s');
   const body = document.getElementById('signalBody');
   if (!filtered.length) {
-    body.innerHTML = `<tr><td colspan="14"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="15"><div class="empty-state"><div class="icon">&#9782;</div>No signals match current filters</div></td></tr>`;
     return;
   }
   body.innerHTML = filtered.map(r => {
@@ -949,6 +950,7 @@ function renderTable() {
       </td>
       <td><span class="target-p">₹${tgtFmt}</span></td>
       <td><span class="sl-p">₹${slFmt}</span></td>
+      <td>${buildAiCell(r.ai_confidence)}</td>
       <td id="lp_${r.symbol}"><span class="price-loading">—</span></td>
       <td style="color:${rsiColor}">${r.rsi}</td>
       <td style="color:${adxColor}">${r.adx}</td>
@@ -1306,6 +1308,24 @@ function renderTracker() {
       <td></td>
     </tr>`;
   }).join('');
+}
+
+// ── AI CONFIDENCE CELL ───────────────────────────────────────────────────
+function buildAiCell(conf) {
+  if (conf === null || conf === undefined) {
+    return '<span style="color:var(--text-muted);font-size:10px;">—</span>';
+  }
+  const pct  = Math.round(conf * 100);
+  const color = pct >= 55 ? 'var(--green)'
+              : pct >= 40 ? 'var(--amber)'
+              : 'var(--red)';
+  const emoji = pct >= 55 ? '✦' : pct >= 40 ? '◆' : '◇';
+  return `<div style="display:flex;align-items:center;gap:4px;">
+    <span style="color:${color};font-weight:600;font-size:11px;">${emoji} ${pct}%</span>
+    <div style="width:28px;height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
+      <div style="width:${pct}%;height:100%;background:${color};border-radius:2px;"></div>
+    </div>
+  </div>`;
 }
 
 // ── LIVE PRICE POLLING ───────────────────────────────────────────────────

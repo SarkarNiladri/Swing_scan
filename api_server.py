@@ -277,6 +277,69 @@ except Exception:
     ]
 
 IST            = pytz.timezone("Asia/Kolkata")
+
+# ════════════════════════════════════════════════════════════════════════════
+# AI SIGNAL SCORER
+# ════════════════════════════════════════════════════════════════════════════
+_ai_model     = None
+_ai_features  = None
+_ai_meta      = {}
+
+def load_ai_model():
+    """Load the trained ML model if available. Silently skips if not found."""
+    global _ai_model, _ai_features, _ai_meta
+    import os, pickle, json
+    model_path = os.path.join(os.path.dirname(__file__), "signal_model.pkl")
+    meta_path  = os.path.join(os.path.dirname(__file__), "signal_model_meta.json")
+    try:
+        with open(model_path, "rb") as f:
+            payload = pickle.load(f)
+        _ai_model    = payload["model"]
+        _ai_features = payload["features"]
+        _ai_meta     = {k: v for k, v in payload.items() if k != "model"}
+        if meta_path and os.path.exists(meta_path):
+            with open(meta_path) as f:
+                _ai_meta = json.load(f)
+        print(f"[AI] Model loaded — AUC={_ai_meta.get('auc',0):.3f} | "
+              f"Trained on {_ai_meta.get('n_trades',0)} trades")
+    except FileNotFoundError:
+        print("[AI] No model file found — AI scoring disabled")
+    except Exception as e:
+        print(f"[AI] Model load error: {e}")
+
+def ai_confidence(score: int, adx: float, rsi: float, hour: int,
+                  is_sell: int, sl_pct: float, tgt_pct: float) -> float | None:
+    """
+    Returns AI win probability (0.0-1.0) or None if model not loaded.
+    Features must match exactly what train_model.py produces.
+    """
+    if _ai_model is None:
+        return None
+    try:
+        row = {
+            "score":      score,
+            "adx":        adx,
+            "rsi":        rsi,
+            "hour":       hour,
+            "is_sell":    is_sell,
+            "is_hour_12": int(hour == 12),
+            "is_hour_11": int(hour == 11),
+            "is_hour_13": int(hour == 13),
+            "is_hour_10": int(hour == 10),
+            "adx_strong": int(adx >= 40),
+            "adx_very":   int(adx >= 55),
+            "score_high": int(score >= 11),
+            "rsi_zone":   0 if rsi < 35 else (1 if rsi < 50 else (2 if rsi < 65 else 3)),
+            "sl_pct":     sl_pct,
+            "tgt_pct":    tgt_pct,
+        }
+        X    = [[row[f] for f in _ai_features]]
+        prob = _ai_model.predict_proba(X)[0][1]
+        return round(float(prob), 4)
+    except Exception:
+        return None
+
+load_ai_model()
 MARKET_OPEN    = (9, 15)
 MARKET_CLOSE   = (15, 30)
 
@@ -302,7 +365,7 @@ COUNTER_TREND_PENALTY= 2      # Extra score needed to trade against Nifty trend
 SCORE9_ADX_MIN       = 30     # Score-9 signals need ADX≥30 (higher conviction)
 
 # Time-of-day filter (validated: 11:00-13:30 IST has best win rate)
-TRADE_HOUR_START = 10
+TRADE_HOUR_START = 11
 TRADE_HOUR_END   = 13
 TRADE_MIN_END    = 30
 
@@ -1091,24 +1154,40 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             return None
 
         data_source = source_log[0] if source_log else "unknown"
+
+        # ── AI CONFIDENCE SCORE ───────────────────────────────────────────
+        sl_pct  = abs(close - stop_loss) / close * 100
+        tgt_pct = abs(target - close)    / close * 100
+        now_h   = datetime.now(IST).hour
+        ai_conf = ai_confidence(
+            score   = score,
+            adx     = adx,
+            rsi     = rsi,
+            hour    = now_h,
+            is_sell = 1 if signal == "SELL" else 0,
+            sl_pct  = sl_pct,
+            tgt_pct = tgt_pct,
+        )
+
         return {
-            "symbol":      symbol,
-            "signal":      signal,
-            "entry":       round(close, 2),
-            "target":      target,
-            "stop_loss":   stop_loss,
-            "score":       score,
-            "rsi":         round(rsi, 1),
-            "adx":         round(adx, 1),
-            "vol_ratio":   round(vol_ratio, 1),
-            "daily_atr":   round(effective_atr, 2),
-            "daily_rsi":   daily_rsi,
-            "sentiment":   sentiment_label,
-            "candle":      (c_name if (signal=="BUY" and bull_c) or (signal=="SELL" and bear_c) else "—"),
-            "reasons":     " | ".join(reasons),
-            "time":        datetime.now(IST).strftime("%H:%M:%S IST"),
-            "data_source": data_source,
-            "current_price": round(close, 2),   # populated fresh at signal time
+            "symbol":       symbol,
+            "signal":       signal,
+            "entry":        round(close, 2),
+            "target":       target,
+            "stop_loss":    stop_loss,
+            "score":        score,
+            "rsi":          round(rsi, 1),
+            "adx":          round(adx, 1),
+            "vol_ratio":    round(vol_ratio, 1),
+            "daily_atr":    round(effective_atr, 2),
+            "daily_rsi":    daily_rsi,
+            "sentiment":    sentiment_label,
+            "candle":       (c_name if (signal=="BUY" and bull_c) or (signal=="SELL" and bear_c) else "—"),
+            "reasons":      " | ".join(reasons),
+            "time":         datetime.now(IST).strftime("%H:%M:%S IST"),
+            "data_source":  data_source,
+            "current_price": round(close, 2),
+            "ai_confidence": ai_conf,          # 0.0-1.0 or null if model not loaded
         }
     except Exception:
         return None

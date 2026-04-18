@@ -7,3 +7,4 @@ pytz
 feedparser
 httpx
 kiteconnect
+scikit-learn
