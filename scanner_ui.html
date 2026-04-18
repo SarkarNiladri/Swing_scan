@@ -696,6 +696,7 @@
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:10px;color:var(--text-muted);">&#128260; Auto-updates every 60s</span>
           <button onclick="fetchTracker()" style="background:var(--blue-dim);border:1px solid var(--blue);color:var(--blue);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;">Refresh</button>
+          <button onclick="exportTradesCSV()" style="background:var(--green-dim);border:1px solid var(--green);color:var(--green);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;" title="Export closed trades as CSV for AI retraining">⬇ Export CSV</button>
           <button onclick="resetTracker()" style="background:var(--red-dim);border:1px solid var(--red);color:var(--red);padding:3px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;">Reset Week</button>
         </div>
       </div>
@@ -1245,6 +1246,32 @@ function addTradeToTracker(signal) {
     trackerData.open++;
     updateTrackerMetrics();
     renderTracker();
+  }
+}
+
+async function exportTradesCSV() {
+  if (!connected) { logAdd('Not connected', 'warn'); return; }
+  try {
+    const url = apiBase() + '/tracker/export';
+    const resp = await fetch(authUrl(url));
+    if (resp.status === 404) {
+      logAdd('No closed trades to export yet — wait for WIN/LOSS resolutions', 'warn');
+      return;
+    }
+    if (!resp.ok) { logAdd('Export failed: ' + resp.status, 'error'); return; }
+
+    // Trigger file download
+    const blob = await resp.blob();
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    const cd   = resp.headers.get('Content-Disposition') || '';
+    const fname= cd.match(/filename=(.+)/)?.[1] || 'live_trades.csv';
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    logAdd(`Exported ${fname} — use with train_model.py to retrain AI`, 'info');
+  } catch(e) {
+    logAdd('Export error: ' + e.message, 'error');
   }
 }
 

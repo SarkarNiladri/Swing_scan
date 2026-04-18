@@ -1237,18 +1237,38 @@ def add_trade(signal: dict):
     # Skip if already tracked
     if any(t["id"] == trade_id for t in trade_tracker["trades"]):
         return
+    entry    = float(signal["entry"])
+    sl       = float(signal["stop_loss"])
+    tgt      = float(signal["target"])
+    sl_pct   = round(abs(entry - sl)  / entry * 100, 3) if entry > 0 else 0
+    tgt_pct  = round(abs(tgt  - entry) / entry * 100, 3) if entry > 0 else 0
+    # Parse IST hour from signal time string e.g. "10:30:00 IST"
+    try:
+        sig_hour = int(signal.get("time","12:00:00").split(":")[0])
+    except Exception:
+        sig_hour = datetime.now(IST).hour
+
     trade_tracker["trades"].append({
-        "id":        trade_id,
-        "symbol":    signal["symbol"],
-        "signal":    signal["signal"],
-        "entry":     signal["entry"],
-        "target":    signal["target"],
-        "stop_loss": signal["stop_loss"],
-        "score":     signal["score"],
-        "time":      signal.get("time", ""),
-        "outcome":   "OPEN",
-        "resolved_at": None,
-        "pnl_pct":   None,
+        "id":           trade_id,
+        "symbol":       signal["symbol"],
+        "signal":       signal["signal"],
+        "entry":        signal["entry"],
+        "target":       signal["target"],
+        "stop_loss":    signal["stop_loss"],
+        "score":        signal["score"],
+        "adx":          signal.get("adx",    0),
+        "rsi":          signal.get("rsi",    50),
+        "hour":         sig_hour,
+        "sl_pct":       sl_pct,
+        "tgt_pct":      tgt_pct,
+        "ai_confidence":signal.get("ai_confidence", None),
+        "source":       signal.get("data_source", "kite"),
+        "time":         signal.get("time", ""),
+        "date":         datetime.now(IST).strftime("%d %b %Y"),
+        "outcome":      "OPEN",
+        "resolved_at":  None,
+        "pnl_pct":      None,
+        "exit":         None,
     })
     print(f"[tracker] Added {signal['signal']} trade: {signal['symbol']}")
 
@@ -1859,6 +1879,52 @@ async def tracker_reset(auth: bool = Depends(verify_auth)):
     trade_tracker["trades"]     = []
     trade_tracker["week_start"] = get_week_start()
     return {"reset": True, "week_start": trade_tracker["week_start"]}
+
+
+@app.get("/tracker/export")
+async def tracker_export(auth: bool = Depends(verify_auth)):
+    """
+    Export all CLOSED trades (WIN/LOSS) as a CSV file.
+    Format matches backtest CSV — ready for train_model.py retraining.
+    Only exports resolved trades (not OPEN ones — no outcome yet).
+    """
+    import io, csv as csv_mod
+    from fastapi.responses import StreamingResponse
+
+    closed = [t for t in trade_tracker["trades"]
+              if t["outcome"] in ("WIN", "LOSS")]
+
+    if not closed:
+        return JSONResponse({"error": "No closed trades to export"}, status_code=404)
+
+    # Columns matching backtest CSV exactly
+    fieldnames = [
+        "symbol", "time", "date", "hour", "signal", "score",
+        "entry", "target", "stop_loss", "outcome", "pnl_pct",
+        "candles", "exit", "rsi", "adx", "source",
+        "sl_pct", "tgt_pct", "ai_confidence",
+    ]
+
+    output = io.StringIO()
+    writer = csv_mod.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for t in closed:
+        row = {f: t.get(f, "") for f in fieldnames}
+        # candles not tracked in live mode — set to 0
+        if not row.get("candles"):
+            row["candles"] = 0
+        # exit type
+        if not row.get("exit"):
+            row["exit"] = "TARGET" if t["outcome"] == "WIN" else "SL"
+        writer.writerow(row)
+
+    output.seek(0)
+    fname = f"live_trades_{datetime.now(IST).strftime('%Y%m%d_%H%M')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
 
 
 @app.get("/prices")
