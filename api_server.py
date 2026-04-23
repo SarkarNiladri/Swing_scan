@@ -66,13 +66,13 @@ except ImportError:
 
 
 # ── Telegram Notification Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '8773932134:AAGI6zGCtw8gpj-oH5qzRvmjw0q6_ZXPJwk')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6086165397')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # ── Zerodha Kite Connect Config ────────────────────────────────────────────
-KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
-KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    'ax238c39wtrbiwow')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', 'dliej4ndyeepu040x1aug46udjq4prkd')
 
 # Kite session state — access token valid for one trading day
 kite_state = {
@@ -431,13 +431,41 @@ scan_state = {
     "notified_date":  None,
 }
 
-# ── Trade tracker — persists in memory, polled by UI ──────────────────────
+# ── Trade tracker — persists to disk so trades survive server restarts ──────
 # Each trade: {id, symbol, signal, entry, target, stop_loss, score, time,
 #              outcome: OPEN|WIN|LOSS, resolved_at, pnl_pct}
 trade_tracker = {
-    "trades":      [],          # list of trade dicts
-    "week_start":  None,        # ISO date of current week start (Monday)
+    "trades":      [],
+    "week_start":  None,
 }
+
+TRACKER_FILE = "/tmp/swingscan_tracker.json"
+
+def save_tracker():
+    """Persist trade tracker to disk so restarts don't lose data."""
+    try:
+        import json as _json
+        with open(TRACKER_FILE, "w") as f:
+            _json.dump(trade_tracker, f)
+    except Exception as e:
+        print(f"[tracker] Save error: {e}")
+
+def load_tracker():
+    """Load trade tracker from disk on startup."""
+    try:
+        import json as _json, os as _os
+        if _os.path.exists(TRACKER_FILE):
+            with open(TRACKER_FILE) as f:
+                data = _json.load(f)
+            trade_tracker["trades"]     = data.get("trades", [])
+            trade_tracker["week_start"] = data.get("week_start", None)
+            print(f"[tracker] Loaded {len(trade_tracker['trades'])} trades from disk")
+        else:
+            print("[tracker] No saved trades found — starting fresh")
+    except Exception as e:
+        print(f"[tracker] Load error: {e}")
+
+load_tracker()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1225,6 +1253,7 @@ def reset_tracker_if_new_week():
         trade_tracker["trades"]     = []
         trade_tracker["week_start"] = week_start
         print(f"[tracker] Weekly reset — new week started {week_start}")
+        save_tracker()
 
 
 def add_trade(signal: dict):
@@ -1271,6 +1300,7 @@ def add_trade(signal: dict):
         "exit":         None,
     })
     print(f"[tracker] Added {signal['signal']} trade: {signal['symbol']}")
+    save_tracker()
 
 
 def resolve_trade_outcome(trade: dict, df: pd.DataFrame) -> tuple:
@@ -1372,6 +1402,7 @@ def check_open_trades():
                 trade["outcome"]     = outcome
                 trade["pnl_pct"]     = pnl_pct
                 trade["resolved_at"] = datetime.now(IST).strftime("%H:%M:%S IST")
+                save_tracker()
                 source = "Kite" if kite_active else "yfinance"
                 print(f"[tracker] {trade['symbol']} → {outcome} ({pnl_pct:+.2f}%) via {source}")
                 threading.Thread(target=notify_outcome, args=(trade, outcome, pnl_pct), daemon=True).start()
@@ -1878,6 +1909,7 @@ async def tracker_reset(auth: bool = Depends(verify_auth)):
     """Manually reset the trade tracker."""
     trade_tracker["trades"]     = []
     trade_tracker["week_start"] = get_week_start()
+    save_tracker()
     return {"reset": True, "week_start": trade_tracker["week_start"]}
 
 
