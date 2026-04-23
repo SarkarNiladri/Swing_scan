@@ -431,39 +431,117 @@ scan_state = {
     "notified_date":  None,
 }
 
-# ── Trade tracker — persists to disk so trades survive server restarts ──────
-# Each trade: {id, symbol, signal, entry, target, stop_loss, score, time,
-#              outcome: OPEN|WIN|LOSS, resolved_at, pnl_pct}
+# ── Trade tracker — PostgreSQL backed, survives deploys & restarts ──────────
+# In-memory cache is populated from DB on startup and kept in sync.
 trade_tracker = {
     "trades":      [],
     "week_start":  None,
 }
 
-TRACKER_FILE = "/tmp/swingscan_tracker.json"
+# ── PostgreSQL connection ─────────────────────────────────────────────────
+import psycopg2, psycopg2.extras
 
-def save_tracker():
-    """Persist trade tracker to disk so restarts don't lose data."""
+_DB_URL = os.environ.get("DATABASE_URL", "")
+
+def _db_conn():
+    """Return a psycopg2 connection. Raises if DATABASE_URL not set."""
+    if not _DB_URL:
+        raise RuntimeError("DATABASE_URL env var not set")
+    return psycopg2.connect(_DB_URL, sslmode="require")
+
+def init_db():
+    """Create trades table if it doesn't exist."""
     try:
-        import json as _json
-        with open(TRACKER_FILE, "w") as f:
-            _json.dump(trade_tracker, f)
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id            TEXT PRIMARY KEY,
+                        symbol        TEXT,
+                        signal        TEXT,
+                        entry         REAL,
+                        target        REAL,
+                        stop_loss     REAL,
+                        score         INTEGER,
+                        adx           REAL,
+                        rsi           REAL,
+                        hour          INTEGER,
+                        sl_pct        REAL,
+                        tgt_pct       REAL,
+                        ai_confidence REAL,
+                        source        TEXT,
+                        time          TEXT,
+                        date          TEXT,
+                        outcome       TEXT DEFAULT 'OPEN',
+                        resolved_at   TEXT,
+                        pnl_pct       REAL,
+                        exit          TEXT,
+                        week_start    TEXT
+                    )
+                """)
+            conn.commit()
+        print("[db] Table ready")
     except Exception as e:
-        print(f"[tracker] Save error: {e}")
+        print(f"[db] init_db error: {e}")
+
+def save_trade_db(trade: dict):
+    """Upsert a single trade to PostgreSQL."""
+    try:
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trades
+                        (id, symbol, signal, entry, target, stop_loss,
+                         score, adx, rsi, hour, sl_pct, tgt_pct,
+                         ai_confidence, source, time, date,
+                         outcome, resolved_at, pnl_pct, exit, week_start)
+                    VALUES
+                        (%(id)s, %(symbol)s, %(signal)s, %(entry)s, %(target)s,
+                         %(stop_loss)s, %(score)s, %(adx)s, %(rsi)s, %(hour)s,
+                         %(sl_pct)s, %(tgt_pct)s, %(ai_confidence)s, %(source)s,
+                         %(time)s, %(date)s, %(outcome)s, %(resolved_at)s,
+                         %(pnl_pct)s, %(exit)s, %(week_start)s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        outcome      = EXCLUDED.outcome,
+                        resolved_at  = EXCLUDED.resolved_at,
+                        pnl_pct      = EXCLUDED.pnl_pct,
+                        exit         = EXCLUDED.exit
+                """, {**trade, "week_start": trade_tracker["week_start"]})
+            conn.commit()
+    except Exception as e:
+        print(f"[db] save_trade error: {e}")
+
+def delete_week_db(week_start: str):
+    """Delete all trades for a given week (weekly reset)."""
+    try:
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM trades WHERE week_start = %s", (week_start,))
+            conn.commit()
+    except Exception as e:
+        print(f"[db] delete_week error: {e}")
 
 def load_tracker():
-    """Load trade tracker from disk on startup."""
+    """Load current week's trades from PostgreSQL into memory on startup."""
     try:
-        import json as _json, os as _os
-        if _os.path.exists(TRACKER_FILE):
-            with open(TRACKER_FILE) as f:
-                data = _json.load(f)
-            trade_tracker["trades"]     = data.get("trades", [])
-            trade_tracker["week_start"] = data.get("week_start", None)
-            print(f"[tracker] Loaded {len(trade_tracker['trades'])} trades from disk")
-        else:
-            print("[tracker] No saved trades found — starting fresh")
+        init_db()
+        week_start = get_week_start()
+        with _db_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM trades WHERE week_start = %s ORDER BY time",
+                    (week_start,)
+                )
+                rows = cur.fetchall()
+        trade_tracker["trades"]     = [dict(r) for r in rows]
+        trade_tracker["week_start"] = week_start
+        print(f"[db] Loaded {len(rows)} trades for week {week_start}")
     except Exception as e:
-        print(f"[tracker] Load error: {e}")
+        print(f"[db] load_tracker error: {e} — falling back to empty")
+
+def save_tracker():
+    """No-op — individual saves handled by save_trade_db(). Kept for compatibility."""
+    pass
 
 load_tracker()
 
@@ -1250,10 +1328,12 @@ def reset_tracker_if_new_week():
     """Clears all trades at the start of each new week (Monday IST)."""
     week_start = get_week_start()
     if trade_tracker["week_start"] != week_start:
+        old_week = trade_tracker["week_start"]
         trade_tracker["trades"]     = []
         trade_tracker["week_start"] = week_start
         print(f"[tracker] Weekly reset — new week started {week_start}")
-        save_tracker()
+        if old_week:
+            delete_week_db(old_week)
 
 
 def add_trade(signal: dict):
@@ -1300,7 +1380,7 @@ def add_trade(signal: dict):
         "exit":         None,
     })
     print(f"[tracker] Added {signal['signal']} trade: {signal['symbol']}")
-    save_tracker()
+    save_trade_db(trade_tracker["trades"][-1])
 
 
 def resolve_trade_outcome(trade: dict, df: pd.DataFrame) -> tuple:
@@ -1402,7 +1482,7 @@ def check_open_trades():
                 trade["outcome"]     = outcome
                 trade["pnl_pct"]     = pnl_pct
                 trade["resolved_at"] = datetime.now(IST).strftime("%H:%M:%S IST")
-                save_tracker()
+                save_trade_db(trade)
                 source = "Kite" if kite_active else "yfinance"
                 print(f"[tracker] {trade['symbol']} → {outcome} ({pnl_pct:+.2f}%) via {source}")
                 threading.Thread(target=notify_outcome, args=(trade, outcome, pnl_pct), daemon=True).start()
@@ -1907,9 +1987,11 @@ async def tracker_trades(auth: bool = Depends(verify_auth)):
 @app.post("/tracker/reset")
 async def tracker_reset(auth: bool = Depends(verify_auth)):
     """Manually reset the trade tracker."""
+    old_week = trade_tracker["week_start"]
     trade_tracker["trades"]     = []
     trade_tracker["week_start"] = get_week_start()
-    save_tracker()
+    if old_week:
+        delete_week_db(old_week)
     return {"reset": True, "week_start": trade_tracker["week_start"]}
 
 

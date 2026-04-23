@@ -7,4 +7,5 @@ pytz
 feedparser
 httpx
 kiteconnect
+psycopg2-binary
 scikit-learn
