@@ -256,13 +256,17 @@ def send_telegram(signal: dict):
         ]
         msg = "\n".join(lines)
 
-        httpx.post(
+        resp = httpx.post(
             TELEGRAM_API_URL,
             json={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'},
             timeout=10,
         )
+        if resp.status_code == 200:
+            print(f"[telegram] ✅ Sent: {signal['symbol']} {signal['signal']}")
+        else:
+            print(f"[telegram] ❌ Failed ({resp.status_code}): {resp.text}")
     except Exception as e:
-        print(f'Telegram error: {e}')
+        print(f'[telegram] ❌ Error: {e}')
 
 # ── Try importing Symbols list ────────────────────────────────────────────
 try:
@@ -1720,7 +1724,12 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
                         add_trade(result)   # always register in trade tracker
                         ok, reason = should_notify_telegram(result)
                         if ok:
+                            print(f"[telegram] Sending notification for {result['symbol']} {result['signal']}")
                             threading.Thread(target=send_telegram, args=(result,), daemon=True).start()
+                        else:
+                            print(f"[telegram] Filtered: {result['symbol']} — {reason}")
+                    else:
+                        print(f"[telegram] Skipped duplicate: {result['symbol']}")
 
             scan_state["last_scan"] = datetime.now(IST).isoformat()
             yield f"data: {json.dumps({'type':'done','total_signals':signal_count,'scanned':len(symbol_list)})}\n\n"
