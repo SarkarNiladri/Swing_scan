@@ -961,7 +961,7 @@ def fetch_nifty_daily() -> pd.DataFrame | None:
 # CORE STOCK ANALYSIS
 # ════════════════════════════════════════════════════════════════════════════
 
-def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
+def analyze_stock(symbol: str, nifty_trend: str, manual: bool = False) -> dict | None:
     """
     High-quality signal logic v3:
     1. EMA + ADX both MANDATORY — no signal without both
@@ -1037,17 +1037,18 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
 
         # ════════════════════════════════════════════════════════════
         # GATE 1B — TIME-OF-DAY FILTER (validated: 11:00-13:30 IST)
-        # Best win rate window from backtest analysis
+        # Skipped for manual scans — only enforced on auto scheduler
         # ════════════════════════════════════════════════════════════
-        now_ist  = datetime.now(IST)
-        c_hour   = now_ist.hour
-        c_minute = now_ist.minute
-        after_start = (c_hour > TRADE_HOUR_START or
-                       (c_hour == TRADE_HOUR_START and c_minute >= 0))
-        before_end  = (c_hour < TRADE_HOUR_END or
-                       (c_hour == TRADE_HOUR_END and c_minute <= TRADE_MIN_END))
-        if not (after_start and before_end):
-            return None
+        if not manual:
+            now_ist  = datetime.now(IST)
+            c_hour   = now_ist.hour
+            c_minute = now_ist.minute
+            after_start = (c_hour > TRADE_HOUR_START or
+                           (c_hour == TRADE_HOUR_START and c_minute >= 0))
+            before_end  = (c_hour < TRADE_HOUR_END or
+                           (c_hour == TRADE_HOUR_END and c_minute <= TRADE_MIN_END))
+            if not (after_start and before_end):
+                return None
 
         # ════════════════════════════════════════════════════════════
         # GATE 1C — MACD DIRECTION ALIGNMENT
@@ -1680,10 +1681,9 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
             nifty_trend, nifty_adx = await loop.run_in_executor(None, get_nifty_trend)
             yield f"data: {json.dumps({'type':'start','total':len(symbol_list),'nifty_trend':nifty_trend,'nifty_adx':nifty_adx})}\n\n"
 
-            # Nifty ADX gate
+            # Nifty ADX gate — INFO only for manual scan, not blocking
             if nifty_adx < NIFTY_ADX_GATE:
-                yield f"data: {json.dumps({'type':'done','total_signals':0,'scanned':0,'skipped':True,'reason':f'Nifty ADX={nifty_adx:.1f} < {NIFTY_ADX_GATE} — market too choppy'})}\n\n"
-                return
+                yield f"data: {json.dumps({'type':'warning','reason':f'Nifty ADX={nifty_adx:.1f} < {NIFTY_ADX_GATE} — market choppy, signals may be weak'})}\n\n"
 
             signal_count = 0
             for idx, symbol in enumerate(symbol_list, 1):
@@ -1695,8 +1695,8 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
                 yield f"data: {json.dumps({'type':'progress','symbol':symbol,'index':idx,'total':len(symbol_list)})}\n\n"
                 await asyncio.sleep(0)   # yield control so the event is flushed
 
-                # Run blocking IO in thread pool
-                result = await loop.run_in_executor(None, analyze_stock, symbol, nifty_trend)
+                # Run blocking IO in thread pool — manual=True bypasses time filter
+                result = await loop.run_in_executor(None, analyze_stock, symbol, nifty_trend, True)
 
                 scan_state["scanned"] = idx
 
