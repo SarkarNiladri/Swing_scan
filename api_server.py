@@ -66,13 +66,13 @@ except ImportError:
 
 
 # ── Telegram Notification Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '8773932134:AAGI6zGCtw8gpj-oH5qzRvmjw0q6_ZXPJwk')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6086165397')
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # ── Zerodha Kite Connect Config ────────────────────────────────────────────
-KITE_API_KEY    = os.environ.get('KITE_API_KEY',    'ax238c39wtrbiwow')
-KITE_API_SECRET = os.environ.get('KITE_API_SECRET', 'dliej4ndyeepu040x1aug46udjq4prkd')
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
 
 # Kite session state — access token valid for one trading day
 kite_state = {
@@ -438,6 +438,14 @@ trade_tracker = {
     "week_start":  None,
 }
 
+
+def get_week_start() -> str:
+    """Returns the ISO date string of this week's Monday in IST."""
+    today = datetime.now(IST).date()
+    monday = today - pd.Timedelta(days=today.weekday())
+    return monday.isoformat()
+
+
 # ── PostgreSQL connection ─────────────────────────────────────────────────
 import psycopg2, psycopg2.extras
 
@@ -486,6 +494,8 @@ def init_db():
 
 def save_trade_db(trade: dict):
     """Upsert a single trade to PostgreSQL."""
+    if not _DB_URL:
+        return
     try:
         with _db_conn() as conn:
             with conn.cursor() as cur:
@@ -513,6 +523,8 @@ def save_trade_db(trade: dict):
 
 def delete_week_db(week_start: str):
     """Delete all trades for a given week (weekly reset)."""
+    if not _DB_URL:
+        return
     try:
         with _db_conn() as conn:
             with conn.cursor() as cur:
@@ -523,9 +535,15 @@ def delete_week_db(week_start: str):
 
 def load_tracker():
     """Load current week's trades from PostgreSQL into memory on startup."""
+    week_start = get_week_start()
+    trade_tracker["week_start"] = week_start
+
+    if not _DB_URL:
+        print("[db] DATABASE_URL not set — running without persistence")
+        return
+
     try:
         init_db()
-        week_start = get_week_start()
         with _db_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -533,11 +551,11 @@ def load_tracker():
                     (week_start,)
                 )
                 rows = cur.fetchall()
-        trade_tracker["trades"]     = [dict(r) for r in rows]
-        trade_tracker["week_start"] = week_start
+        trade_tracker["trades"] = [dict(r) for r in rows]
         print(f"[db] Loaded {len(rows)} trades for week {week_start}")
     except Exception as e:
-        print(f"[db] load_tracker error: {e} — falling back to empty")
+        print(f"[db] load_tracker error: {e} — running without persistence")
+        print(f"[db] Check DATABASE_URL — use Internal Database URL from Render PostgreSQL dashboard")
 
 def save_tracker():
     """No-op — individual saves handled by save_trade_db(). Kept for compatibility."""
@@ -1317,11 +1335,6 @@ def market_is_open() -> bool:
 # TRADE TRACKER HELPERS
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_week_start() -> str:
-    """Returns the ISO date string of this week's Monday in IST."""
-    today = datetime.now(IST).date()
-    monday = today - pd.Timedelta(days=today.weekday())
-    return monday.isoformat()
 
 
 def reset_tracker_if_new_week():
