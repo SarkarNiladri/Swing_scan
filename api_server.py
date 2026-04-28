@@ -370,7 +370,7 @@ SCORE9_ADX_MIN       = 30     # Score-9 signals need ADX≥30 (higher conviction
 
 # Time-of-day filter (validated: 11:00-13:30 IST has best win rate)
 TRADE_HOUR_START = 11
-TRADE_HOUR_END   = 13
+TRADE_HOUR_END   = 14
 TRADE_MIN_END    = 30
 
 # ── Background scheduler config ───────────────────────────────────────────
@@ -965,7 +965,7 @@ def fetch_nifty_daily() -> pd.DataFrame | None:
 # CORE STOCK ANALYSIS
 # ════════════════════════════════════════════════════════════════════════════
 
-def analyze_stock(symbol: str, nifty_trend: str, manual: bool = False) -> dict | None:
+def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
     """
     High-quality signal logic v3:
     1. EMA + ADX both MANDATORY — no signal without both
@@ -1040,19 +1040,10 @@ def analyze_stock(symbol: str, nifty_trend: str, manual: bool = False) -> dict |
             return None
 
         # ════════════════════════════════════════════════════════════
-        # GATE 1B — TIME-OF-DAY FILTER (validated: 11:00-13:30 IST)
-        # Skipped for manual scans — only enforced on auto scheduler
+        # GATE 1B — TIME-OF-DAY FILTER
+        # Now handled by scheduler_loop (auto) — always bypassed here.
+        # analyze_stock is a pure signal quality function.
         # ════════════════════════════════════════════════════════════
-        if not manual:
-            now_ist  = datetime.now(IST)
-            c_hour   = now_ist.hour
-            c_minute = now_ist.minute
-            after_start = (c_hour > TRADE_HOUR_START or
-                           (c_hour == TRADE_HOUR_START and c_minute >= 0))
-            before_end  = (c_hour < TRADE_HOUR_END or
-                           (c_hour == TRADE_HOUR_END and c_minute <= TRADE_MIN_END))
-            if not (after_start and before_end):
-                return None
 
         # ════════════════════════════════════════════════════════════
         # GATE 1C — MACD DIRECTION ALIGNMENT
@@ -1592,16 +1583,32 @@ def scheduler_loop():
     while True:
         try:
             import time as _time
-            now_ts = datetime.now(IST).timestamp()
+            now      = datetime.now(IST)
+            now_ts   = now.timestamp()
+            c_hour   = now.hour
+            c_minute = now.minute
             reset_tracker_if_new_week()
 
             if market_is_open():
-                # Full scan every 15 min
-                if (now_ts - last_scan_time) >= AUTO_SCAN_INTERVAL:
-                    last_scan_time = now_ts
-                    run_background_scan()
                 # Check open trades every minute during market hours
                 threading.Thread(target=check_open_trades, daemon=True).start()
+
+                # Full scan every 15 min — but ONLY during signal window
+                in_scan_window = (
+                    (c_hour > TRADE_HOUR_START or
+                     (c_hour == TRADE_HOUR_START and c_minute >= 0))
+                    and
+                    (c_hour < TRADE_HOUR_END or
+                     (c_hour == TRADE_HOUR_END and c_minute <= TRADE_MIN_END))
+                )
+
+                if (now_ts - last_scan_time) >= AUTO_SCAN_INTERVAL:
+                    if in_scan_window:
+                        last_scan_time = now_ts
+                        run_background_scan()
+                    else:
+                        last_scan_time = now_ts  # prevent burst scanning after window opens
+                        print(f"[scheduler] {c_hour:02d}:{c_minute:02d} IST — outside scan window ({TRADE_HOUR_START}:00-{TRADE_HOUR_END}:{TRADE_MIN_END:02d}), skipping")
 
         except Exception as e:
             print(f"[scheduler] Loop error: {e}")
@@ -1699,8 +1706,8 @@ async def scan_stream(symbols: str = "", auth: bool = Depends(verify_auth)):
                 yield f"data: {json.dumps({'type':'progress','symbol':symbol,'index':idx,'total':len(symbol_list)})}\n\n"
                 await asyncio.sleep(0)   # yield control so the event is flushed
 
-                # Run blocking IO in thread pool — manual=True bypasses time filter
-                result = await loop.run_in_executor(None, analyze_stock, symbol, nifty_trend, True)
+                # Run blocking IO in thread pool
+                result = await loop.run_in_executor(None, analyze_stock, symbol, nifty_trend)
 
                 scan_state["scanned"] = idx
 
