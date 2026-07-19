@@ -9,3 +9,4 @@ httpx
 kiteconnect
 psycopg2-binary
 scikit-learn
+anthropic

@@ -57,6 +57,17 @@ try:
 except ImportError:
     TALIB = False
 
+# ── Anthropic client for market sentiment analysis ────────────────────────
+try:
+    import anthropic as _anthropic
+    _anthropic_client = _anthropic.Anthropic(
+        api_key=os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+    print("[sentiment] Anthropic client ready")
+except Exception as _e:
+    _anthropic_client = None
+    print(f"[sentiment] Anthropic not available: {_e}")
+
 # ── Try importing feedparser for news sentiment ────────────────────────────
 try:
     import feedparser
@@ -66,13 +77,13 @@ except ImportError:
 
 
 # ── Telegram Notification Config ──────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN',   '8773932134:AAGI6zGCtw8gpj-oH5qzRvmjw0q6_ZXPJwk')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '6086165397')
 TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # ── Zerodha Kite Connect Config ────────────────────────────────────────────
-KITE_API_KEY    = os.environ.get('KITE_API_KEY',    '')
-KITE_API_SECRET = os.environ.get('KITE_API_SECRET', '')
+KITE_API_KEY    = os.environ.get('KITE_API_KEY',    'ax238c39wtrbiwow')
+KITE_API_SECRET = os.environ.get('KITE_API_SECRET', 'dliej4ndyeepu040x1aug46udjq4prkd')
 
 # Kite session state — access token valid for one trading day
 kite_state = {
@@ -283,6 +294,162 @@ except Exception:
 IST            = pytz.timezone("Asia/Kolkata")
 
 # ════════════════════════════════════════════════════════════════════════════
+# MARKET SENTIMENT ANALYZER
+# ════════════════════════════════════════════════════════════════════════════
+
+# News RSS feeds — market level + sector level
+MARKET_NEWS_FEEDS = [
+    "https://economictimes.indiatimes.com/markets/rss.cms",
+    "https://www.moneycontrol.com/rss/marketsindia.xml",
+]
+
+SECTOR_NEWS_FEEDS = {
+    "Banking":  "https://economictimes.indiatimes.com/industry/banking/rss.cms",
+    "IT":       "https://economictimes.indiatimes.com/industry/services/it/rss.cms",
+    "Pharma":   "https://economictimes.indiatimes.com/industry/healthcare/rss.cms",
+    "Auto":     "https://economictimes.indiatimes.com/industry/auto/rss.cms",
+    "Energy":   "https://economictimes.indiatimes.com/industry/energy/powerothers/rss.cms",
+    "FMCG":     "https://economictimes.indiatimes.com/industry/cons-products/fmcg/rss.cms",
+    "Metals":   "https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rss.cms",
+    "Finance":  "https://economictimes.indiatimes.com/industry/banking/finance/rss.cms",
+}
+
+# Stock → Sector mapping
+SECTOR_MAP = {
+    "HDFCBANK": "Banking",  "ICICIBANK": "Banking",  "KOTAKBANK": "Banking",
+    "AXISBANK":  "Banking",  "SBIN":      "Banking",  "PNB":       "Banking",
+    "CANBK":    "Banking",  "BANDHANBNK":"Banking",  "INDUSINDBK":"Banking",
+    "TCS":      "IT",       "INFY":      "IT",       "WIPRO":     "IT",
+    "HCLTECH":  "IT",       "TECHM":     "IT",
+    "SUNPHARMA":"Pharma",   "DRREDDY":   "Pharma",   "CIPLA":     "Pharma",
+    "DIVISLAB": "Pharma",   "LUPIN":     "Pharma",   "BIOCON":    "Pharma",
+    "GLAND":    "Pharma",   "ALKEM":     "Pharma",   "ABBOTINDIA":"Pharma",
+    "SANOFI":   "Pharma",   "PFIZER":    "Pharma",   "GLAXO":     "Pharma",
+    "TORNTPHARM":"Pharma",  "IPCALAB":   "Pharma",
+    "MARUTI":   "Auto",     "M&M":       "Auto",     "HEROMOTOCO":"Auto",
+    "EICHERMOT":"Auto",     "TVSMOTOR":  "Auto",     "BAJAJ-AUTO":"Auto",
+    "MOTHERSON":"Auto",     "BOSCHLTD":  "Auto",     "BALKRISIND":"Auto",
+    "MRF":      "Auto",
+    "HINDUNILVR":"FMCG",   "ITC":       "FMCG",     "NESTLEIND": "FMCG",
+    "BRITANNIA":"FMCG",    "DABUR":     "FMCG",     "MARICO":    "FMCG",
+    "TATACONSUM":"FMCG",   "GODREJCP":  "FMCG",     "PIDILITIND":"FMCG",
+    "ONGC":     "Energy",   "BPCL":      "Energy",   "NTPC":      "Energy",
+    "POWERGRID":"Energy",   "COALINDIA": "Energy",   "ADANIENT":  "Energy",
+    "TATASTEEL":"Metals",   "JSWSTEEL":  "Metals",   "HINDALCO":  "Metals",
+    "BAJFINANCE":"Finance",  "BAJAJFINSV":"Finance",  "MUTHOOTFIN":"Finance",
+    "CHOLAFIN": "Finance",  "AAVAS":     "Finance",
+    "LT":       "Infra",    "ULTRACEMCO":"Infra",    "BHEL":      "Infra",
+    "ADANIPORTS":"Infra",   "HUDCO":     "Infra",    "RAILTEL":   "Infra",
+}
+
+def get_stock_sector(symbol: str) -> str:
+    """Return sector name for a given stock symbol."""
+    return SECTOR_MAP.get(symbol.upper(), "General")
+
+# Sentiment cache — refreshed every 30 minutes
+_sentiment_cache: dict = {
+    "MARKET": {"sentiment": "NEUTRAL", "confidence": 50, "reason": "Not yet analyzed", "headlines": []},
+}
+_sentiment_last_updated: datetime | None = None
+_sentiment_lock = threading.Lock()
+
+def _fetch_headlines(feed_url: str, max_items: int = 6) -> list[str]:
+    """Fetch latest headlines from an RSS feed."""
+    try:
+        if not feedparser:
+            return []
+        feed  = feedparser.parse(feed_url)
+        items = feed.entries[:max_items]
+        return [e.get("title", "") for e in items if e.get("title")]
+    except Exception as e:
+        print(f"[sentiment] Feed error {feed_url}: {e}")
+        return []
+
+def _call_haiku(headlines: list[str], context: str) -> dict:
+    """Call Claude Haiku to classify sentiment from headlines."""
+    if not _anthropic_client or not headlines:
+        return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "No data"}
+    try:
+        prompt = (
+            f"Analyze these Indian stock market headlines for {context} sentiment.\n"
+            f"Headlines:\n" + "\n".join(f"- {h}" for h in headlines) +
+            f"\n\nReply ONLY with valid JSON (no markdown):\n"
+            f'{{"sentiment": "BULLISH|BEARISH|NEUTRAL", "confidence": 0-100, "reason": "one line max 10 words"}}'
+        )
+        resp = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=120,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip()
+        # Strip any accidental markdown
+        text = text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text)
+        # Validate keys
+        assert data["sentiment"] in ("BULLISH", "BEARISH", "NEUTRAL")
+        data["confidence"] = max(0, min(100, int(data.get("confidence", 50))))
+        data["headlines"] = headlines
+        return data
+    except Exception as e:
+        print(f"[sentiment] Haiku error: {e}")
+        return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "Analysis failed", "headlines": headlines}
+
+def refresh_market_sentiment():
+    """
+    Fetch headlines for market + each sector and classify sentiment via Claude Haiku.
+    Runs in a background thread every 30 minutes.
+    """
+    global _sentiment_last_updated
+    print("[sentiment] Refreshing market sentiment...")
+    new_cache = {}
+
+    # Overall market
+    market_headlines = []
+    for url in MARKET_NEWS_FEEDS:
+        market_headlines.extend(_fetch_headlines(url, 5))
+    market_headlines = market_headlines[:8]
+    new_cache["MARKET"] = _call_haiku(market_headlines, "overall Indian stock market")
+    print(f"[sentiment] Market → {new_cache['MARKET']['sentiment']} ({new_cache['MARKET']['confidence']}%)")
+
+    # Each sector
+    for sector, url in SECTOR_NEWS_FEEDS.items():
+        headlines = _fetch_headlines(url, 6)
+        new_cache[sector] = _call_haiku(headlines, f"{sector} sector")
+        print(f"[sentiment] {sector:<10} → {new_cache[sector]['sentiment']} ({new_cache[sector]['confidence']}%)")
+
+    with _sentiment_lock:
+        _sentiment_cache.update(new_cache)
+        _sentiment_last_updated = datetime.now(IST)
+
+    print("[sentiment] Refresh complete")
+
+def get_sentiment_for_stock(symbol: str) -> tuple[str, str]:
+    """
+    Returns (market_sentiment, sector_sentiment) for a given stock.
+    Values: BULLISH | BEARISH | NEUTRAL
+    """
+    with _sentiment_lock:
+        market  = _sentiment_cache.get("MARKET", {}).get("sentiment", "NEUTRAL")
+        sector  = get_stock_sector(symbol)
+        sector_s = _sentiment_cache.get(sector, {}).get("sentiment", "NEUTRAL")
+    return market, sector_s
+
+def _sentiment_refresh_loop():
+    """Background thread: refresh sentiment every 30 minutes."""
+    import time as _t
+    _t.sleep(10)   # short delay after server start
+    while True:
+        try:
+            refresh_market_sentiment()
+        except Exception as e:
+            print(f"[sentiment] Refresh loop error: {e}")
+        _t.sleep(1800)   # 30 minutes
+
+_sent_thread = threading.Thread(target=_sentiment_refresh_loop, daemon=True, name="SwingScan-Sentiment")
+_sent_thread.start()
+print("[sentiment] Background sentiment analyzer started — refreshes every 30 min")
+
+# ════════════════════════════════════════════════════════════════════════════
 # AI SIGNAL SCORER
 # ════════════════════════════════════════════════════════════════════════════
 _ai_model     = None
@@ -370,7 +537,7 @@ SCORE9_ADX_MIN       = 30     # Score-9 signals need ADX≥30 (higher conviction
 
 # Time-of-day filter (validated: 11:00-13:30 IST has best win rate)
 TRADE_HOUR_START = 11
-TRADE_HOUR_END   = 14
+TRADE_HOUR_END   = 13
 TRADE_MIN_END    = 30
 
 # ── Background scheduler config ───────────────────────────────────────────
@@ -1232,12 +1399,28 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             penalty_reasons.append(f"Nifty bullish — SELL needs {sell_threshold}+ (has {score})")
             score = 0
 
-        # News sentiment penalty
-        _, sentiment_label = get_news_sentiment(symbol)
-        if signal == "BUY"  and sentiment_label == "Negative":
-            score -= 1; penalty_reasons.append("News negative(-1)")
-        elif signal == "SELL" and sentiment_label == "Positive":
-            score -= 1; penalty_reasons.append("News positive(-1)")
+        # ── AI MARKET + SECTOR SENTIMENT ─────────────────────────────────
+        # Use Claude Haiku classified sentiment to adjust scores
+        _, stock_sentiment_label = get_news_sentiment(symbol)   # legacy per-stock
+        market_sent, sector_sent = get_sentiment_for_stock(symbol)
+
+        # Market sentiment — strong directional bias
+        if market_sent == "BULLISH":
+            buy_score  += 1; reasons.append("Market sentiment BULLISH +1")
+        elif market_sent == "BEARISH":
+            sell_score += 1; reasons.append("Market sentiment BEARISH +1")
+
+        # Sector sentiment — additional boost
+        if sector_sent == "BULLISH":
+            buy_score  += 1; reasons.append(f"Sector ({get_stock_sector(symbol)}) BULLISH +1")
+        elif sector_sent == "BEARISH":
+            sell_score += 1; reasons.append(f"Sector ({get_stock_sector(symbol)}) BEARISH +1")
+
+        # Legacy per-stock news penalty (still active as a weak signal)
+        if signal == "BUY"  and stock_sentiment_label == "Negative":
+            score -= 1; penalty_reasons.append("Stock news negative(-1)")
+        elif signal == "SELL" and stock_sentiment_label == "Positive":
+            score -= 1; penalty_reasons.append("Stock news positive(-1)")
 
         if penalty_reasons:
             reasons.append("Penalties: " + ", ".join(penalty_reasons))
@@ -1622,6 +1805,34 @@ _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True, name="S
 _scheduler_thread.start()
 print("[scheduler] Background scheduler started — will scan every 15 min during market hours")
 
+# ── Self-ping to prevent Render free tier spin-down ───────────────────────
+def _self_ping_loop():
+    """Ping own /ping endpoint every 10 min to stay alive on free hosting tiers."""
+    import time as _t
+    _t.sleep(60)
+    # Support both Render and Railway URL env vars
+    own_url = (
+        os.environ.get("RAILWAY_PUBLIC_DOMAIN") or
+        os.environ.get("RENDER_EXTERNAL_URL") or
+        os.environ.get("APP_URL", "")
+    )
+    if own_url:
+        if not own_url.startswith("http"):
+            own_url = "https://" + own_url
+        ping_url = own_url.rstrip("/") + "/ping"
+        print(f"[keepalive] Self-ping active → {ping_url} every 10 min")
+        while True:
+            try:
+                httpx.get(ping_url, timeout=10)
+            except Exception as e:
+                print(f"[keepalive] Ping error: {e}")
+            _t.sleep(600)
+    else:
+        print("[keepalive] No URL env var found — self-ping disabled")
+
+_ping_thread = threading.Thread(target=_self_ping_loop, daemon=True, name="SwingScan-Keepalive")
+_ping_thread.start()
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # ROUTES
@@ -1780,6 +1991,29 @@ async def scan_stop(auth: bool = Depends(verify_auth)):
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     return {"ping": "pong", "time": datetime.now(IST).isoformat()}
+
+
+@app.get("/sentiment")
+async def get_sentiment(auth: bool = Depends(verify_auth)):
+    """
+    Returns current market + sector sentiment analyzed by Claude Haiku.
+    Refreshed every 30 minutes in the background.
+    """
+    with _sentiment_lock:
+        cache_snapshot = dict(_sentiment_cache)
+    updated = _sentiment_last_updated.strftime("%H:%M:%S IST") if _sentiment_last_updated else "Not yet"
+    return {
+        "updated_at": updated,
+        "market":     cache_snapshot.get("MARKET", {}),
+        "sectors":    {k: v for k, v in cache_snapshot.items() if k != "MARKET"},
+    }
+
+
+@app.post("/sentiment/refresh")
+async def force_refresh_sentiment(auth: bool = Depends(verify_auth)):
+    """Force an immediate sentiment refresh (useful after news events)."""
+    threading.Thread(target=refresh_market_sentiment, daemon=True).start()
+    return {"status": "Sentiment refresh triggered"}
 
 
 # ════════════════════════════════════════════════════════════════════════════
