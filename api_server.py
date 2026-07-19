@@ -1484,7 +1484,7 @@ def analyze_stock(symbol: str, nifty_trend: str) -> dict | None:
             "vol_ratio":    round(vol_ratio, 1),
             "daily_atr":    round(effective_atr, 2),
             "daily_rsi":    daily_rsi,
-            "sentiment":    sentiment_label,
+            "sentiment":    stock_sentiment_label,
             "candle":       (c_name if (signal=="BUY" and bull_c) or (signal=="SELL" and bear_c) else "—"),
             "reasons":      " | ".join(reasons),
             "time":         datetime.now(IST).strftime("%H:%M:%S IST"),
