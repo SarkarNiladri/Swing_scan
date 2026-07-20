@@ -882,21 +882,24 @@ function buildSentimentCard(label, data) {
 }
 
 async function loadSentiment() {
-  if (!connected) { logAdd('Not connected', 'warn'); return; }
+  if (!connected) return;
   try {
-    const resp = await fetch(authUrl(apiBase() + '/sentiment'));
-    if (!resp.ok) { logAdd('Sentiment fetch failed', 'warn'); return; }
+    const url = apiBase() + '/sentiment';
+    const resp = await fetch(url);
+    if (!resp.ok) return;
     const data = await resp.json();
 
-    document.getElementById('sentimentUpdated').textContent = `Updated: ${data.updated_at}`;
+    const elem = document.getElementById('sentimentUpdated');
+    if (elem) elem.textContent = `Updated: ${data.updated_at}`;
 
     let html = buildSentimentCard('📊 Overall Market', data.market);
     for (const [sector, sdata] of Object.entries(data.sectors || {})) {
       html += buildSentimentCard(sector, sdata);
     }
-    document.getElementById('sentimentGrid').innerHTML = html || '<div style="color:var(--text-muted)">No data yet</div>';
+    const grid = document.getElementById('sentimentGrid');
+    if (grid) grid.innerHTML = html || '<div style="color:var(--text-muted)">No data yet</div>';
   } catch(e) {
-    logAdd('Sentiment error: ' + e.message, 'error');
+    console.log('Sentiment load skipped:', e.message);
   }
 }
 

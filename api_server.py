@@ -1994,7 +1994,7 @@ async def ping():
 
 
 @app.get("/sentiment")
-async def get_sentiment(auth: bool = Depends(verify_auth)):
+async def get_sentiment():
     """
     Returns current market + sector sentiment analyzed by Claude Haiku.
     Refreshed every 30 minutes in the background.
@@ -2010,7 +2010,7 @@ async def get_sentiment(auth: bool = Depends(verify_auth)):
 
 
 @app.post("/sentiment/refresh")
-async def force_refresh_sentiment(auth: bool = Depends(verify_auth)):
+async def force_refresh_sentiment():
     """Force an immediate sentiment refresh (useful after news events)."""
     threading.Thread(target=refresh_market_sentiment, daemon=True).start()
     return {"status": "Sentiment refresh triggered"}
