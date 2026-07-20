@@ -852,6 +852,69 @@ let scanning = false;
 let signals = [];
 let trades = [];
 
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* MARKET SENTIMENT                                                     */
+/* ═══════════════════════════════════════════════════════════════════════ */
+function sentimentColor(s) {
+  return s === 'BULLISH' ? 'var(--success)' : s === 'BEARISH' ? 'var(--danger)' : 'var(--text-muted)';
+}
+
+function sentimentEmoji(s) {
+  return s === 'BULLISH' ? '🟢' : s === 'BEARISH' ? '🔴' : '🟡';
+}
+
+function buildSentimentCard(label, data) {
+  if (!data) return '';
+  const color = sentimentColor(data.sentiment);
+  const pct   = data.confidence || 50;
+  return `
+    <div class="sentiment-card">
+      <div class="sentiment-label">${label}</div>
+      <div class="sentiment-val" style="color:${color}">
+        ${sentimentEmoji(data.sentiment)} ${data.sentiment}
+      </div>
+      <div class="sentiment-reason">${data.reason || ''}</div>
+      <div class="conf-bar">
+        <div class="conf-fill" style="width:${pct}%;background:${color};"></div>
+      </div>
+      <div style="font-size:9px;color:var(--text-weak);margin-top:3px;">${pct}% confidence</div>
+    </div>`;
+}
+
+async function loadSentiment() {
+  if (!connected) { logAdd('Not connected', 'warn'); return; }
+  try {
+    const resp = await fetch(authUrl(apiBase() + '/sentiment'));
+    if (!resp.ok) { logAdd('Sentiment fetch failed', 'warn'); return; }
+    const data = await resp.json();
+
+    document.getElementById('sentimentUpdated').textContent = `Updated: ${data.updated_at}`;
+
+    let html = buildSentimentCard('📊 Overall Market', data.market);
+    for (const [sector, sdata] of Object.entries(data.sectors || {})) {
+      html += buildSentimentCard(sector, sdata);
+    }
+    document.getElementById('sentimentGrid').innerHTML = html || '<div style="color:var(--text-muted)">No data yet</div>';
+  } catch(e) {
+    logAdd('Sentiment error: ' + e.message, 'error');
+  }
+}
+
+async function forceSentimentRefresh() {
+  if (!connected) return;
+  try {
+    await fetch(authUrl(apiBase() + '/sentiment/refresh'), {method: 'POST'});
+    logAdd('Sentiment re-analysis triggered — takes ~30 seconds', 'info');
+    setTimeout(loadSentiment, 35000);
+  } catch(e) {
+    logAdd('Refresh error: ' + e.message, 'error');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* API & STATE                                                            */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
 function apiBase() { return document.getElementById('apiUrl').value; }
 function authUrl(url) { return apiPassword ? `${url}?api_key=${apiPassword}` : url; }
 
