@@ -356,9 +356,10 @@ _sentiment_lock = threading.Lock()
 def _fetch_headlines(feed_url: str, max_items: int = 6) -> list[str]:
     """Fetch latest headlines from an RSS feed."""
     try:
-        if not feedparser:
+        if not FEEDPARSER:
             return []
-        feed  = feedparser.parse(feed_url)
+        import feedparser as _fp
+        feed  = _fp.parse(feed_url)
         items = feed.entries[:max_items]
         return [e.get("title", "") for e in items if e.get("title")]
     except Exception as e:
@@ -367,8 +368,10 @@ def _fetch_headlines(feed_url: str, max_items: int = 6) -> list[str]:
 
 def _call_haiku(headlines: list[str], context: str) -> dict:
     """Call Claude Haiku to classify sentiment from headlines."""
-    if not _anthropic_client or not headlines:
-        return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "No data"}
+    if not headlines:
+        return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "No headlines fetched"}
+    if not _anthropic_client:
+        return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "Anthropic API not configured"}
     try:
         prompt = (
             f"Analyze these Indian stock market headlines for {context} sentiment.\n"
@@ -430,22 +433,21 @@ def refresh_market_sentiment():
     print("[sentiment] Refreshing market sentiment...")
     new_cache = {}
 
-    # Overall market — try feedparser first, fallback to httpx
-    market_headlines = []
-    for url in MARKET_NEWS_FEEDS:
-        market_headlines.extend(_fetch_headlines(url, 5))
+    # Overall market — httpx first (more reliable on Render), feedparser fallback
+    market_headlines = _fetch_headlines_fallback("MARKET")
     if not market_headlines:
-        market_headlines = _fetch_headlines_fallback("MARKET")
+        for url in MARKET_NEWS_FEEDS:
+            market_headlines.extend(_fetch_headlines(url, 5))
     market_headlines = market_headlines[:8]
-    print(f"[sentiment] Market headlines fetched: {len(market_headlines)}")
+    print(f"[sentiment] Market headlines fetched: {len(market_headlines)}: {market_headlines[:2]}")
     new_cache["MARKET"] = _call_haiku(market_headlines, "overall Indian stock market")
     print(f"[sentiment] Market → {new_cache['MARKET']['sentiment']} ({new_cache['MARKET']['confidence']}%)")
 
     # Each sector
     for sector, url in SECTOR_NEWS_FEEDS.items():
-        headlines = _fetch_headlines(url, 6)
+        headlines = _fetch_headlines_fallback(sector)
         if not headlines:
-            headlines = _fetch_headlines_fallback(sector)
+            headlines = _fetch_headlines(url, 6)
         print(f"[sentiment] {sector} headlines: {len(headlines)}")
         new_cache[sector] = _call_haiku(headlines, f"Indian {sector} sector stocks")
         print(f"[sentiment] {sector:<10} → {new_cache[sector]['sentiment']} ({new_cache[sector]['confidence']}%)")
