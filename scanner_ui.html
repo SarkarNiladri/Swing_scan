@@ -710,12 +710,29 @@
     <div class="panel">
       <div class="panel-header">
         <div class="panel-title">Real-Time Scan</div>
-        <div style="display:flex;gap:8px;">
-          <button class="btn primary" onclick="startScan()">▶ Start Scan</button>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span id="scanStatus" style="font-size:11px;color:var(--text-muted);"></span>
+          <button class="btn primary" id="btnStartScan" onclick="startScan()">▶ Start Scan</button>
           <button class="btn" onclick="stopScan()">⏹ Stop</button>
         </div>
       </div>
-      <div style="height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">
+
+      <!-- Progress bar -->
+      <div id="progressWrap" style="display:none;padding:12px 0 4px 0;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span id="progressLabel" style="font-size:11px;color:var(--text-muted);">Scanning...</span>
+          <span id="progressPct" style="font-size:11px;font-weight:700;color:var(--accent);">0%</span>
+        </div>
+        <div style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;">
+          <div id="progressFill" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--success));border-radius:4px;transition:width 0.3s ease;"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:4px;">
+          <span id="progressSignals" style="font-size:10px;color:var(--success);">0 signals</span>
+          <span id="progressStocks" style="font-size:10px;color:var(--text-muted);">0/100 stocks</span>
+        </div>
+      </div>
+
+      <div style="height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-top:8px;">
         <table>
           <thead>
             <tr>
