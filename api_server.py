@@ -355,9 +355,11 @@ IST            = pytz.timezone("Asia/Kolkata")
 # ════════════════════════════════════════════════════════════════════════════
 
 # News RSS feeds — market level + sector level
+# Using multiple sources for reliability
 MARKET_NEWS_FEEDS = [
+    "https://feeds.feedburner.com/ndtvprofit-latest",
+    "https://www.thehindu.com/business/markets/feeder/default.rss",
     "https://economictimes.indiatimes.com/markets/rss.cms",
-    "https://www.moneycontrol.com/rss/marketsindia.xml",
 ]
 
 SECTOR_NEWS_FEEDS = {
@@ -455,31 +457,46 @@ def _call_haiku(headlines: list[str], context: str) -> dict:
         return {"sentiment": "NEUTRAL", "confidence": 50, "reason": "Analysis failed", "headlines": headlines}
 
 def _fetch_headlines_fallback(sector: str) -> list[str]:
-    """Fallback: fetch headlines using httpx when feedparser fails."""
-    try:
-        import re
-        urls = {
-            "MARKET":  "https://economictimes.indiatimes.com/markets/rss.cms",
-            "Banking": "https://economictimes.indiatimes.com/industry/banking/rss.cms",
-            "IT":      "https://economictimes.indiatimes.com/industry/services/it/rss.cms",
-            "Pharma":  "https://economictimes.indiatimes.com/industry/healthcare/rss.cms",
-            "Auto":    "https://economictimes.indiatimes.com/industry/auto/rss.cms",
-            "Energy":  "https://economictimes.indiatimes.com/industry/energy/powerothers/rss.cms",
-            "FMCG":    "https://economictimes.indiatimes.com/industry/cons-products/fmcg/rss.cms",
-            "Metals":  "https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rss.cms",
-            "Finance": "https://economictimes.indiatimes.com/industry/banking/finance/rss.cms",
-        }
-        url = urls.get(sector, urls["MARKET"])
-        resp = httpx.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        pat1 = "<title><!" + "[CDATA[" + "(.*?)" + "]" + "]></title>"
-        titles = re.findall(pat1, resp.text)
-        if not titles:
-            titles = re.findall(r"<title>(.*?)</title>", resp.text)
-        # Skip the feed title (first entry)
-        return [t.strip() for t in titles[1:7] if t.strip()]
-    except Exception as e:
-        print(f"[sentiment] Fallback fetch error for {sector}: {e}")
-        return []
+    """Fetch headlines using multiple strategies."""
+    import re
+    urls_to_try = {
+        "MARKET":  [
+            "https://feeds.feedburner.com/ndtvprofit-latest",
+            "https://www.thehindu.com/business/markets/feeder/default.rss",
+            "https://economictimes.indiatimes.com/markets/rss.cms",
+        ],
+        "Banking": ["https://economictimes.indiatimes.com/industry/banking/rss.cms"],
+        "IT":      ["https://economictimes.indiatimes.com/industry/services/it/rss.cms"],
+        "Pharma":  ["https://economictimes.indiatimes.com/industry/healthcare/rss.cms"],
+        "Auto":    ["https://economictimes.indiatimes.com/industry/auto/rss.cms"],
+        "Energy":  ["https://economictimes.indiatimes.com/industry/energy/powerothers/rss.cms"],
+        "FMCG":    ["https://economictimes.indiatimes.com/industry/cons-products/fmcg/rss.cms"],
+        "Metals":  ["https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rss.cms"],
+        "Finance": ["https://economictimes.indiatimes.com/industry/banking/finance/rss.cms"],
+    }
+    urls = urls_to_try.get(sector, urls_to_try["MARKET"])
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; RSS Reader)",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    for url in urls:
+        try:
+            resp = httpx.get(url, timeout=12, headers=headers, follow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            # Try CDATA format
+            pat1 = "<title><!" + "[CDATA[" + "(.*?)" + "]" + "]></title>"
+            titles = re.findall(pat1, resp.text)
+            if not titles:
+                titles = re.findall(r"<title>(.*?)</title>", resp.text)
+            titles = [t.strip() for t in titles[1:7] if t.strip() and len(t.strip()) > 10]
+            if titles:
+                print(f"[sentiment] Got {len(titles)} headlines from {url}")
+                return titles
+        except Exception as e:
+            print(f"[sentiment] URL failed {url}: {e}")
+            continue
+    return []
 
 def refresh_market_sentiment():
     """

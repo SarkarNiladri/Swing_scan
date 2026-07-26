@@ -714,6 +714,7 @@
           <span id="scanStatus" style="font-size:11px;color:var(--text-muted);"></span>
           <button class="btn primary" id="btnStartScan" onclick="startScan()">▶ Start Scan</button>
           <button class="btn" onclick="stopScan()">⏹ Stop</button>
+          <button class="btn" onclick="window.open(apiBase()+'/kite/login','_blank')" title="Login to Kite for fast accurate data">🔑 Kite Login</button>
         </div>
       </div>
 
@@ -964,46 +965,100 @@ function clearLog() { document.getElementById('logBody').innerHTML = ''; }
 /* ═══════════════════════════════════════════════════════════════════════ */
 /* SCANNING                                                                */
 /* ═══════════════════════════════════════════════════════════════════════ */
-async function startScan() {
-  if (!connected) { logAdd('Not connected', 'error'); return; }
-  scanning = true;
-  logAdd('Starting live scan...', 'info');
-  
-  try {
-    const resp = await fetch(authUrl(apiBase() + '/scan/stream'));
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    
-    let buffer = '';
-    while(true) {
-      const {done, value} = await reader.read();
-      if(done) break;
-      buffer += decoder.decode(value);
-      
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      
-      for(let line of lines) {
-        if(line.startsWith('data:')) {
-          try {
-            const data = JSON.parse(line.slice(5));
-            if(data.signal) {
-              signals.unshift(data);
-              signals = signals.slice(0, 50);
-              renderSignals();
-            }
-          } catch(e) {}
-        }
-      }
-    }
-  } catch(e) {
-    logAdd('Scan error: ' + e.message, 'error');
-  } finally {
-    scanning = false;
+let _scanReader = null;
+
+function setScanUI(running) {
+  const btn  = document.getElementById('btnStartScan');
+  const wrap = document.getElementById('progressWrap');
+  if (btn)  { btn.textContent = running ? '⏳ Scanning...' : '▶ Start Scan'; btn.disabled = running; }
+  if (wrap) wrap.style.display = running ? 'block' : 'none';
+  if (!running) {
+    const fill = document.getElementById('progressFill');
+    if (fill) fill.style.width = '0%';
   }
 }
 
-function stopScan() { scanning = false; logAdd('Scan stopped', 'warn'); }
+function updateProgress(idx, total, sigCount, symbol) {
+  const pct  = total > 0 ? Math.round(idx / total * 100) : 0;
+  const fill  = document.getElementById('progressFill');
+  const label = document.getElementById('progressLabel');
+  const pctEl = document.getElementById('progressPct');
+  const sigs  = document.getElementById('progressSignals');
+  const stks  = document.getElementById('progressStocks');
+  if (fill)  fill.style.width  = pct + '%';
+  if (label) label.textContent = 'Scanning ' + symbol + '...';
+  if (pctEl) pctEl.textContent = pct + '%';
+  if (sigs)  sigs.textContent  = sigCount + ' signal' + (sigCount !== 1 ? 's' : '');
+  if (stks)  stks.textContent  = idx + '/' + total + ' stocks';
+}
+
+async function startScan() {
+  if (!connected) { logAdd('Not connected', 'error'); return; }
+  if (scanning)   { logAdd('Scan already running', 'warn'); return; }
+
+  const kiteEl = document.getElementById('kiteStatus');
+  if (kiteEl && !kiteEl.textContent.includes('✓')) {
+    logAdd('⚠️ Kite not logged in — click Kite Login for fast accurate data', 'warn');
+  }
+
+  scanning = true;
+  let signalCount = 0;
+  setScanUI(true);
+  logAdd('Starting live scan...', 'info');
+
+  try {
+    const resp = await fetch(authUrl(apiBase() + '/scan/stream'));
+    if (!resp.ok) { logAdd('Scan failed: ' + resp.status, 'error'); return; }
+
+    _scanReader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (scanning) {
+      const { done, value } = await _scanReader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          const data = JSON.parse(line.slice(5));
+          if (data.type === 'progress') {
+            updateProgress(data.index, data.total, signalCount, data.symbol);
+          } else if (data.type === 'done') {
+            updateProgress(data.scanned||100, data.scanned||100, signalCount, 'Done');
+            logAdd('✅ Scan complete — ' + signalCount + ' signal(s)', 'success');
+          } else if (data.type === 'warning') {
+            logAdd('⚠️ ' + data.reason, 'warn');
+          } else if (data.type === 'stopped') {
+            logAdd('⏹ Scan stopped', 'warn');
+          } else if (data.symbol) {
+            signalCount++;
+            signals.unshift(data);
+            signals = signals.slice(0, 50);
+            renderSignals();
+            logAdd('🎯 ' + data.symbol + ' ' + data.signal + ' | Score ' + data.score + ' | ADX ' + parseFloat(data.adx||0).toFixed(1), 'success');
+          }
+        } catch(e) {}
+      }
+    }
+  } catch(e) {
+    if (scanning) logAdd('Scan error: ' + e.message, 'error');
+  } finally {
+    scanning = false;
+    _scanReader = null;
+    setScanUI(false);
+  }
+}
+
+async function stopScan() {
+  scanning = false;
+  if (_scanReader) { try { await _scanReader.cancel(); } catch(e){} _scanReader = null; }
+  setScanUI(false);
+  logAdd('⏹ Scan stopped', 'warn');
+}
 
 function renderSignals() {
   const tbody = document.getElementById('signalBody');
