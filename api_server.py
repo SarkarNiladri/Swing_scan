@@ -107,6 +107,60 @@ def kite_get() -> "KiteConnect | None":
     return None
 
 
+def kite_save_token_db(access_token: str, token_date: str):
+    """Persist Kite access token to PostgreSQL so it survives server restarts."""
+    if not _DB_URL:
+        return
+    try:
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS kite_token (
+                        id          INTEGER PRIMARY KEY DEFAULT 1,
+                        access_token TEXT,
+                        token_date   TEXT
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO kite_token (id, access_token, token_date)
+                    VALUES (1, %s, %s)
+                    ON CONFLICT (id) DO UPDATE
+                        SET access_token = EXCLUDED.access_token,
+                            token_date   = EXCLUDED.token_date
+                """, (access_token, token_date))
+            conn.commit()
+        print("[kite] Token saved to DB")
+    except Exception as e:
+        print(f"[kite] DB token save error: {e}")
+
+def kite_load_token_db():
+    """Load Kite token from DB on startup — restores session after restart."""
+    if not _DB_URL or not KITE_AVAILABLE:
+        return
+    try:
+        today = datetime.now(IST).date().isoformat()
+        with _db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT access_token, token_date FROM kite_token WHERE id=1")
+                row = cur.fetchone()
+        if not row:
+            print("[kite] No saved token in DB")
+            return
+        access_token, token_date = row
+        if token_date != today:
+            print(f"[kite] Saved token is from {token_date} — expired, need fresh login")
+            return
+        # Token is from today — restore session
+        kite = KiteConnect(api_key=KITE_API_KEY)
+        kite.set_access_token(access_token)
+        profile = kite.profile()
+        kite_state["access_token"] = access_token
+        kite_state["token_date"]   = token_date
+        kite_state["kite"]         = kite
+        print(f"[kite] ✅ Session restored from DB — {profile.get('user_name','?')} — Kite active")
+    except Exception as e:
+        print(f"[kite] DB token restore error: {e}")
+
 def kite_set_token(access_token: str):
     """Store access token and create KiteConnect session."""
     if not KITE_AVAILABLE:
@@ -116,9 +170,12 @@ def kite_set_token(access_token: str):
         kite.set_access_token(access_token)
         # Verify token works
         profile = kite.profile()
+        today = datetime.now(IST).date().isoformat()
         kite_state["access_token"] = access_token
-        kite_state["token_date"]   = datetime.now(IST).date().isoformat()
+        kite_state["token_date"]   = today
         kite_state["kite"]         = kite
+        # Persist to DB so it survives server restarts
+        kite_save_token_db(access_token, today)
         print(f"[kite] Logged in as {profile.get('user_name','?')} — token valid today")
         return True
     except Exception as e:
@@ -768,6 +825,9 @@ def save_tracker():
     pass
 
 load_tracker()
+
+# Restore Kite session from DB if token is still valid today
+kite_load_token_db()
 
 
 # ════════════════════════════════════════════════════════════════════════════
