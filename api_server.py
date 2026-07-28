@@ -357,20 +357,21 @@ IST            = pytz.timezone("Asia/Kolkata")
 # News RSS feeds — market level + sector level
 # Using multiple sources for reliability
 MARKET_NEWS_FEEDS = [
+    "https://news.google.com/rss/search?q=India+stock+market+Sensex+Nifty+BSE+NSE&hl=en-IN&gl=IN&ceid=IN:en",
     "https://feeds.feedburner.com/ndtvprofit-latest",
     "https://www.thehindu.com/business/markets/feeder/default.rss",
-    "https://economictimes.indiatimes.com/markets/rss.cms",
 ]
 
+# Google News RSS — reliable, no IP blocking, always accessible
 SECTOR_NEWS_FEEDS = {
-    "Banking":  "https://economictimes.indiatimes.com/industry/banking/rss.cms",
-    "IT":       "https://economictimes.indiatimes.com/industry/services/it/rss.cms",
-    "Pharma":   "https://economictimes.indiatimes.com/industry/healthcare/rss.cms",
-    "Auto":     "https://economictimes.indiatimes.com/industry/auto/rss.cms",
-    "Energy":   "https://economictimes.indiatimes.com/industry/energy/powerothers/rss.cms",
-    "FMCG":     "https://economictimes.indiatimes.com/industry/cons-products/fmcg/rss.cms",
-    "Metals":   "https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rss.cms",
-    "Finance":  "https://economictimes.indiatimes.com/industry/banking/finance/rss.cms",
+    "Banking":  "https://news.google.com/rss/search?q=India+banking+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "IT":       "https://news.google.com/rss/search?q=India+IT+technology+stocks+Infosys+TCS+NSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "Pharma":   "https://news.google.com/rss/search?q=India+pharma+healthcare+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "Auto":     "https://news.google.com/rss/search?q=India+automobile+auto+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "Energy":   "https://news.google.com/rss/search?q=India+energy+power+oil+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "FMCG":     "https://news.google.com/rss/search?q=India+FMCG+consumer+goods+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "Metals":   "https://news.google.com/rss/search?q=India+metals+mining+steel+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
+    "Finance":  "https://news.google.com/rss/search?q=India+NBFC+finance+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en",
 }
 
 # Stock → Sector mapping
@@ -461,18 +462,18 @@ def _fetch_headlines_fallback(sector: str) -> list[str]:
     import re
     urls_to_try = {
         "MARKET":  [
+            "https://news.google.com/rss/search?q=India+stock+market+Sensex+Nifty+BSE+NSE&hl=en-IN&gl=IN&ceid=IN:en",
             "https://feeds.feedburner.com/ndtvprofit-latest",
             "https://www.thehindu.com/business/markets/feeder/default.rss",
-            "https://economictimes.indiatimes.com/markets/rss.cms",
         ],
-        "Banking": ["https://economictimes.indiatimes.com/industry/banking/rss.cms"],
-        "IT":      ["https://economictimes.indiatimes.com/industry/services/it/rss.cms"],
-        "Pharma":  ["https://economictimes.indiatimes.com/industry/healthcare/rss.cms"],
-        "Auto":    ["https://economictimes.indiatimes.com/industry/auto/rss.cms"],
-        "Energy":  ["https://economictimes.indiatimes.com/industry/energy/powerothers/rss.cms"],
-        "FMCG":    ["https://economictimes.indiatimes.com/industry/cons-products/fmcg/rss.cms"],
-        "Metals":  ["https://economictimes.indiatimes.com/industry/indl-goods/svs/metals-mining/rss.cms"],
-        "Finance": ["https://economictimes.indiatimes.com/industry/banking/finance/rss.cms"],
+        "Banking": ["https://news.google.com/rss/search?q=India+banking+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "IT":      ["https://news.google.com/rss/search?q=India+IT+technology+stocks+Infosys+TCS+NSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "Pharma":  ["https://news.google.com/rss/search?q=India+pharma+healthcare+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "Auto":    ["https://news.google.com/rss/search?q=India+automobile+auto+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "Energy":  ["https://news.google.com/rss/search?q=India+energy+power+oil+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "FMCG":    ["https://news.google.com/rss/search?q=India+FMCG+consumer+goods+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "Metals":  ["https://news.google.com/rss/search?q=India+metals+mining+steel+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
+        "Finance": ["https://news.google.com/rss/search?q=India+NBFC+finance+stocks+NSE+BSE&hl=en-IN&gl=IN&ceid=IN:en"],
     }
     urls = urls_to_try.get(sector, urls_to_try["MARKET"])
     headers = {
